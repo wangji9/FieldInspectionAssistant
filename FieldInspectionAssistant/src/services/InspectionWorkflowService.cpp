@@ -48,6 +48,10 @@ QVariantMap InspectionWorkflowService::detail(const QString &kind,const QString 
         q.prepare("SELECT revision,created_at,reason FROM report_versions WHERE record_id=? ORDER BY revision DESC");q.addBindValue(recordId);q.exec();while(q.next())reports<<row(q);
     }
     for(auto v:defects){auto d=v.toMap();q.prepare("SELECT * FROM defect_events WHERE defect_id=? ORDER BY rowid");q.addBindValue(d["id"]);q.exec();while(q.next()){auto e=row(q);e["defect_title"]=d["title"];events<<e;}}
+    if (!selectedDefect.isEmpty() && selectedDefect.value("status") == "in_progress") {
+        const auto transition = one(db, "SELECT event_type FROM defect_events WHERE defect_id=? ORDER BY rowid DESC LIMIT 1", {id});
+        selectedDefect["returned"] = transition.value("event_type") == "reopen";
+    }
     auto notes=entries(recordId);auto stages=flow(task,record,defects,notes);bool complete=stages.last().toMap()["state"]=="completed";
     return {{"ok",true},{"asset",asset},{"task",task},{"record",record},{"selected_defect",selectedDefect},{"checks",checks},{"defects",defects},{"events",events},{"photos",photos},{"reports",reports},{"entries",notes},{"all_entries",entries(recordId,true)},{"flow",stages},{"state",complete?"completed":"pending"},{"state_text",complete?"已完成":"待完成"},{"can_write",canWrite(recordId)}};
 }

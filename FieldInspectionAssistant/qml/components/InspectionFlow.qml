@@ -9,16 +9,25 @@ Rectangle {
     property bool defectMode: false
     property var defect: ({})
     property string heading: "巡检执行流程"
+    readonly property int completeCount: displayedSteps.filter(step => step.state === "completed").length
+    readonly property int progress: displayedSteps.length ? Math.round(100 * completeCount / displayedSteps.length) : 0
     readonly property var displayedSteps: {
         if (!defectMode) return steps
-        const names = ["登记", "分派", "整改", "复核", "归档"]
-        const current = ({unassigned:1, pending:2, in_progress:2, review:3, closed:5})[defect.status] ?? 0
-        return names.map((name, index) => ({id:String(index), name:name,
-            state:index < current ? "completed" : index === current && defect.id ? "active" : "pending",
-            detail:index === 2 ? (defect.status === "pending" ? "待开始整改" : defect.assignee_name || "") : ""}))
+        const names = ["登记", "分派", "整改", "复核", "关闭"]
+        const state = defect.status
+        const completed = ({unassigned:1, pending:2, in_progress:2, review:3, reopened:2, closed:5})[state] ?? 0
+        return names.map((name, index) => {
+            const current = index === completed && !!defect.id
+            const status = state === "unassigned" ? "待分派" : state === "pending" ? "待开始"
+                : state === "review" ? "待复核" : state === "reopened" || defect.returned ? "退回整改" : "进行中"
+            return {id:String(index), name:name,
+                state:index < completed ? "completed" : current ? "active" : "pending",
+                status: current ? status : "",
+                detail:index === 2 ? (defect.assignee_name || "") : ""}
+        })
     }
     signal stageClicked(string stage)
-    implicitHeight: 105
+    implicitHeight: defectMode ? 127 : 105
     color: Colors.panel
     border.color: Colors.border
     visible: displayedSteps.length > 0
@@ -27,12 +36,31 @@ Rectangle {
         anchors.fill: parent
         anchors.margins: 6
         spacing: 4
-        Label {
+        RowLayout {
             Layout.fillWidth: true
-            text: flow.heading
-            elide: Text.ElideRight
-            font.bold: true
-            font.pixelSize: Typography.small
+            Label {
+                Layout.fillWidth: true
+                text: flow.heading
+                elide: Text.ElideRight
+                font.bold: true
+                font.pixelSize: Typography.small
+            }
+            Label {
+                visible: flow.defectMode && !!flow.defect.id
+                text: "%1 / %2 个环节　%3%".arg(flow.completeCount).arg(flow.displayedSteps.length).arg(flow.progress)
+                color: Colors.textSecondary
+            }
+        }
+        ProgressBar {
+            objectName: "defectWorkflowProgress"
+            Layout.fillWidth: true
+            Layout.preferredHeight: 5
+            visible: flow.defectMode && !!flow.defect.id
+            from: 0; to: 100; value: flow.progress
+            background: Rectangle { color: "#e4e9ee" }
+            contentItem: Item {
+                Rectangle { width: parent.width * flow.progress / 100; height: parent.height; color: "#35729b" }
+            }
         }
         Flickable {
             id: viewport
@@ -69,7 +97,7 @@ Rectangle {
                                 }
                                 Label {
                                     width: parent.width; elide: Text.ElideRight
-                                    text: stage.complete ? "已完成" : stage.active ? "进行中" : "未到达"
+                                    text: stage.complete ? "已完成" : stage.active ? (stage.modelData.status || "进行中") : "未到达"
                                     color: stage.accent; font.pixelSize: Typography.small
                                 }
                                 Label {

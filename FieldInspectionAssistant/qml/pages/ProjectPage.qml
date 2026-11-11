@@ -25,6 +25,10 @@ Rectangle {
     property string evidenceRecordId: ""
     property string evidenceAssetId: ""
     property string graphDeviceId: ""
+    property string graphEventId: ""
+    property string reportTemplate: "evidence"
+    readonly property var eventTimeline: activeEvent.id
+        ? workspace.eventTimeline(eventId) : []
     readonly property string route: App.nav.page
     readonly property bool eventMode: route === "events"
     readonly property bool diagnosisMode: route === "projectDiagnosis"
@@ -34,7 +38,7 @@ Rectangle {
     readonly property bool hasDiagnosis: !!liveDiagnosis || !!activeEvent.analyzed
     readonly property string diagnosisText: liveDiagnosis || (activeEvent.analyzed
         ? workspace.findingForEvent(eventId) : activeEvent.id
-        ? (workspace.analysisInput(eventId).summary || activeEvent.note || "")
+        ? (activeEvent.note || "对齐证据见上表，运行工程诊断可生成分析建议。")
         : "选择诊断对象后，可核对其关联证据。")
     readonly property var visibleEvents: workspace.events.filter(function(row) {
         return (!page.eventDeviceId || row.device_id === page.eventDeviceId)
@@ -75,6 +79,7 @@ Rectangle {
         evidenceRecordId = ""
         evidenceAssetId = ""
         graphDeviceId = ""
+        graphEventId = ""
         pointField.text = ""
         timeField.text = ""
         captureDialog.close()
@@ -117,6 +122,12 @@ Rectangle {
             const item = workspace.events.find(row => row.id === id)
             const recorded = isRegisteredEvent(item)
             App.nav.push(recorded ? "events" : "projectDiagnosis", {event_id:id})
+        } else if (type === "record" || type === "defect") {
+            const device = workspace.devices.find(row => row.id === graphDeviceId)
+            App.nav.push("operations", {view:type === "record" ? "records" : "defects",
+                asset_id:device ? device.asset_id : "", source_id:id})
+        } else if (type === "finding") {
+            App.nav.push("projectDiagnosis", {event_id:id})
         } else if (type === "report") {
             reportId = id
             previewReportRequested()
@@ -160,7 +171,10 @@ Rectangle {
             evidenceKind = App.nav.param("kind") || ""
             evidenceId = ""
         }
-        if (route === "projectGraph") graphDeviceId = App.nav.param("device_id") || ""
+        if (route === "projectGraph") {
+            graphDeviceId = App.nav.param("device_id") || ""
+            graphEventId = App.nav.param("event_id") || ""
+        }
         if (diagnosisMode) inference.refresh()
         if (diagnosisMode || eventMode) {
             eventDeviceId = App.nav.param("device_id") || ""
@@ -769,6 +783,14 @@ Rectangle {
                         text: "从事件生成报告…"; autoWidth: true; variant: "primary"
                         enabled: page.reportableEvents.length > 0; onClicked: page.newReport()
                     }
+                    AppComboBox {
+                        width: 158; height: 30
+                        textRole: "name"; valueRole: "id"
+                        model: [{id:"evidence",name:"多模态证据报告"}, {id:"brief",name:"巡检事件摘要"},
+                                {id:"followup",name:"缺陷整改跟踪报告"}]
+                        currentIndex: model.findIndex(item => item.id === page.reportTemplate)
+                        onActivated: page.reportTemplate = currentValue
+                    }
                     TouchButton { text: "预览"; autoWidth: true; enabled: !!page.selectedReport; onClicked: page.previewReportRequested() }
                     TouchButton { text: "导出 PDF…"; autoWidth: true; enabled: !!page.selectedReport; onClicked: page.exportReportRequested() }
                     TouchButton { text: "AI 复核"; autoWidth: true; enabled: !!page.selectedReport; onClicked: reportReview.review("projectReport", page.selectedReport) }
@@ -807,7 +829,7 @@ Rectangle {
                         model: [{id:"", name:"全部设备"}].concat(workspace.devices)
                         textRole: "name"; valueRole: "id"
                         currentIndex: model.findIndex(row => row.id === page.graphDeviceId)
-                        onActivated: { page.graphDeviceId = currentValue; graph.selectedId = "" }
+                        onActivated: { page.graphDeviceId = currentValue; page.graphEventId = ""; graph.selectedId = "" }
                     }
                     TouchButton { text: "适应窗口"; autoWidth: true; onClicked: graph.fit() }
                     TouchButton { text: "放大"; autoWidth: true; onClicked: graph.zoomIn() }
@@ -815,7 +837,7 @@ Rectangle {
                     Item { Layout.fillWidth: true }
                     TouchButton {
                         text: "打开节点"; autoWidth: true
-                        enabled: /^(evidence|event|device):/.test(graph.selectedId) && !graph.selectedId.includes("/point:")
+                        enabled: /^(evidence|event|device|finding|report|record|defect):/.test(graph.selectedId) && !graph.selectedId.includes("/point:")
                         onClicked: {
                             const split = graph.selectedId.indexOf(":")
                             page.openResource(graph.selectedId.slice(0, split), graph.selectedId.slice(split + 1))
@@ -827,12 +849,12 @@ Rectangle {
                     Layout.fillWidth: true; Layout.fillHeight: true
                     dynamicLayout: false
                     graph: page.route === "projectGraph" && workspace.evidence.length
-                        ? workspace.evidenceGraph(page.graphDeviceId) : ({})
+                        ? workspace.evidenceGraph(page.graphDeviceId, page.graphEventId) : ({})
                 }
                 Label {
                     Layout.fillWidth: true
                     readonly property var node: (graph.graph.nodes || []).find(item => item.id === graph.selectedId)
-                    text: node ? node.type + "  ·  " + node.name : "工程、设备、测点与原始资料的关系 · 当前设备筛选下最近 36 条资料"
+                    text: node ? [node.type, node.name, node.detail].filter(Boolean).join("  ·  ") : (page.graphEventId ? "当前事件 · 对齐证据、诊断与整改关系" : "当前设备 · 最近 36 条资料")
                     elide: Text.ElideRight
                 }
             }

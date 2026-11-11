@@ -4,6 +4,9 @@
 #include <QJsonObject>
 #include <QLocalSocket>
 #include <QTimer>
+#include <QVariant>
+#include <atomic>
+#include <memory>
 
 class ProjectWorkspace;
 class SessionManager;
@@ -45,6 +48,7 @@ private:
     void consume();
     void fail(const QString &message);
     bool canAnalyze() const;
+    void submitEvent(const QString &id);
     void submit(const QString &kind, const QString &id, const QString &question);
 
     ProjectWorkspace *workspace_;
@@ -56,5 +60,6 @@ private:
     QByteArray request_, buffer_;
     QString operation_, job_, project_, event_, subject_, kind_, answer_;
     QString status_ = tr("尚未检查推理服务");
+    std::shared_ptr<std::atomic_bool> mediaCancelled_;
     bool ready_ = false, busy_ = false, queued_ = false;
 };

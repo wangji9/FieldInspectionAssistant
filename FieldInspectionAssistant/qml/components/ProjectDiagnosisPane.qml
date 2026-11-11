@@ -33,9 +33,10 @@ Flickable {
                 onClicked: pane.projectPage.inference.cancelQueued()
             }
             TouchButton {
-                text: "查看基准资料"; autoWidth: true; height: 29
-                enabled: !!pane.projectPage.activeEvent.anchor_id
-                onClicked: pane.projectPage.openEvidence(pane.projectPage.activeEvent.anchor_id)
+                text: "查看事件图谱"; autoWidth: true; height: 29
+                enabled: !!pane.projectPage.activeEvent.id
+                onClicked: App.nav.push("projectGraph", {event_id:pane.projectPage.eventId,
+                    device_id:pane.projectPage.activeEvent.device_id})
             }
             TouchButton {
                 text: "打开事件"; autoWidth: true; height: 29
@@ -71,6 +72,24 @@ Flickable {
             columns: [{key:"title", title:"诊断对象", width:0}, {key:"device", title:"设备", width:95},
                       {key:"point", title:"测点", width:80}, {key:"classificationLabel", title:"判定", width:58}]
             onRowClicked: function(index, item) { pane.projectPage.eventId = item.id }
+        }
+
+        Label {
+            visible: alignment.items.length > 0
+            width: layout.width; text: "证据时间轴（UTC）"; font.bold: true
+        }
+        DataTable {
+            id: alignment
+            objectName: "eventTimelineTable"
+            visible: items.length > 0
+            width: layout.width
+            height: 32 + rowHeight * Math.min(6, items.length)
+            spreadsheet: true
+            items: pane.projectPage.eventTimeline
+            columns: [{key:"modality",title:"模态",width:65},
+                {key:"timeUtc",title:"采集时间",width:183}, {key:"offsetLabel",title:"相对时间",width:85},
+                {key:"clockLabel",title:"时间来源",width:107}, {key:"observationLabel",title:"观测",width:0}]
+            onRowDoubleClicked: function(index, item) { pane.projectPage.openEvidence(item.id) }
         }
 
         Label {

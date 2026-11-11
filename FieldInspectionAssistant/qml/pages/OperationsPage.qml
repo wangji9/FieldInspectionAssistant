@@ -25,7 +25,7 @@ Rectangle {
     property alias newInspection:inspectionEntry
     property alias manager:management
     AnalysisReviewDialog { id: operationReview }
-    function status(value){return ({pending:"待开始",overdue:"已超期",in_progress:view==="defects"?"处理中":"进行中",completed:"已完成",unassigned:"未分派",review:"待复核",closed:"已关闭",draft:"草稿",submitted:"已提交"})[value]||value}
+    function status(value){return ({pending:"待开始",overdue:"已超期",in_progress:view==="defects"?"处理中":"进行中",completed:"已完成",unassigned:"未分派",review:"待复核",closed:"已关闭",reopened:"退回整改",draft:"草稿",submitted:"已提交"})[value]||value}
     function columns(){
         var sets={tasks:[{key:"task_code",title:"任务编号",width:150},{key:"name",title:"任务",width:210},{key:"assignee_name",title:"负责人",width:110},{key:"status_text",title:"状态",width:90},{key:"planned_at",title:"计划时间",width:165,format:"datetime"}],records:[{key:"task_code",title:"所属任务",width:155},{key:"created_at",title:"巡检时间",width:165,format:"datetime"},{key:"result",title:"结果",width:120},{key:"status_text",title:"状态",width:90}],defects:[{key:"defect_code",title:"缺陷编号",width:145},{key:"title",title:"缺陷",width:210},{key:"task_code",title:"发现任务",width:155},{key:"status_text",title:"状态",width:90},{key:"assignee_name",title:"处理人",width:110}]};return sets[view]||[]
     }

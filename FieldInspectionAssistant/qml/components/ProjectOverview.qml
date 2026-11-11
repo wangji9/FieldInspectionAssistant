@@ -47,7 +47,7 @@ Flickable {
         function onDefectsChanged() { overview.refreshInspection() }
     }
     readonly property var imageFiles: files.filter(function(file) {
-        return file.kind === "image" || file.kind === "thermal"
+        return (file.kind === "image" || file.kind === "thermal") && /\.(jpe?g|png|bmp|webp|ppm|pgm)$/i.test(file.title)
     }).slice(0, 4)
     readonly property var stages: {
         const matches = row => !selectedDevice.id || row.device_id === selectedDevice.id
@@ -325,7 +325,7 @@ Flickable {
                     anchors.fill: parent
                     visible: overview.imageFiles.length > 0
                     columns: Math.max(1, Math.min(overview.thumbnailColumns, overview.imageFiles.length))
-                    rows: Math.max(1, Math.ceil(overview.imageFiles.length / columns))
+                    readonly property int thumbnailRows: Math.max(1, Math.ceil(overview.imageFiles.length / columns))
                     spacing: 5
                     Repeater {
                         model: overview.imageFiles
@@ -334,7 +334,7 @@ Flickable {
                             required property var modelData
                             readonly property var preview: overview.workspace.evidenceFile(modelData.id)
                             width: Math.max(0, (thumbnailGrid.width + thumbnailGrid.spacing) / thumbnailGrid.columns - thumbnailGrid.spacing)
-                            height: Math.max(0, (thumbnailGrid.height + thumbnailGrid.spacing) / thumbnailGrid.rows - thumbnailGrid.spacing)
+                            height: Math.max(0, (thumbnailGrid.height + thumbnailGrid.spacing) / thumbnailGrid.thumbnailRows - thumbnailGrid.spacing)
                             padding: 3
                             enabled: !!preview.url
                             onClicked: overview.previewRequested(modelData.id)

@@ -274,3 +274,29 @@ PY
 ```
 
 在应用内选择「文件 → 打开演示工程」，按 [泵组复检案例](docs/miiep-project.md) 检查工程导入、证据关联、模型分析与报告导出。设备与诊断、事件、缺陷的关系见 [巡检关联规则](docs/inspection-relationships.md)。维护、备份和报告操作见 [现场业务与运维说明](PRODUCT_OPERATIONS.md)。
+
+### 多模态泵组演示
+
+实现与兼容性记录见 [版本变更记录](docs/CHANGELOG.md)。
+
+工程诊断以设备、测点、巡检记录及基准时间组织证据。各文件按 UTC 毫秒排序，同时显示相对基准的时间差及来源。视频和图像由板端推理服务解读，WAV、时序 CSV、温度矩阵和文字摘录参与诊断。图谱与归档报告从同一工程数据读取。
+
+公开实录使用 [齿轮泵气蚀试验](https://commons.wikimedia.org/wiki/File:Cavitation_in_a_gear_pump.ogv) 和 [独立泵声](https://commons.wikimedia.org/wiki/File:Pump.ogg)。二者来自不同设备。照片取自试验视频，声学包络取自该录音。热像、巡检读数与整改记录为培训样例。演示时间轴用于说明对齐流程。
+
+在板端应用源码目录准备素材后，使用隔离的业务数据库执行端到端验收。
+
+```bash
+demo=$(mktemp -d /tmp/fieldops-demo.XXXXXXXX)
+mkdir -p "$demo"/{media,work,data,config}
+curl -fL -A "FieldInspectionAssistant Demo" "https://upload.wikimedia.org/wikipedia/commons/6/67/Cavitation_in_a_gear_pump.ogv" -o "$demo/video.ogv"
+curl -fL -A "FieldInspectionAssistant Demo" "https://upload.wikimedia.org/wikipedia/commons/1/18/Pump.ogg" -o "$demo/audio.ogg"
+ffmpeg -v error -ss 17 -i "$demo/video.ogv" -t 32 -an -vf "scale=960:-2,fps=24" -c:v libx264 -threads 3 -pix_fmt yuv420p "$demo/media/pump-cavitation.mp4"
+ffmpeg -v error -ss 3 -i "$demo/media/pump-cavitation.mp4" -frames:v 1 "$demo/media/pump-frame.jpg"
+ffmpeg -v error -i "$demo/audio.ogg" -ar 16000 -ac 1 -c:a pcm_s16le "$demo/media/pump-motor.wav"
+python3 tests/project_demo.py "$demo/work" --public-media "$demo/media"
+XDG_DATA_HOME="$demo/data" XDG_CONFIG_HOME="$demo/config" QT_QPA_PLATFORM=offscreen \
+  QT_QUICK_BACKEND=software FIELDOPS_QA_SCRIPT="$demo/work/steps.json" \
+  FIELDOPS_QA_DIR="$demo/work/audit" ./build/field_inspection_assistant
+```
+
+演示生成脚本依赖 `python3-pil`、FFmpeg 和板端推理服务。验收日志与截图位于 `$demo/work/audit/`，工程归档及三种 PDF 位于 `$demo/work/exports/`。正式签审流程仍由巡检管理处理，事件报告可直接归档并按模板导出。

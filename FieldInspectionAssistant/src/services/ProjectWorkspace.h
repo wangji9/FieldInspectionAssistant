@@ -50,10 +50,13 @@ public:
                                           const QString &point, const QString &kind, const QString &recordId = {});
     Q_INVOKABLE QVariantMap addTextEvidence(const QString &device, const QString &point,
                                            const QString &title, const QString &text, const QString &recordId = {});
-    Q_INVOKABLE QVariantMap evidenceGraph(const QString &device) const;
+    Q_INVOKABLE QVariantMap evidenceGraph(const QString &device, const QString &eventId = {}) const;
+    Q_INVOKABLE QVariantList eventTimeline(const QString &eventId) const;
     Q_INVOKABLE QVariantMap fuse(const QString &anchorId);
     Q_INVOKABLE QVariantMap evidenceFile(const QString &evidenceId) const;
     Q_INVOKABLE bool playEvidenceVideo(const QString &evidenceId) const;
+    QVariantList eventMedia(const QString &eventId) const;
+    bool saveObservations(const QString &projectId, const QString &eventId, const QVariantList &observations);
     Q_INVOKABLE QVariantMap analysisInput(const QString &eventId) const;
     Q_INVOKABLE QString findingForEvent(const QString &eventId) const;
     Q_INVOKABLE QVariantMap saveFinding(const QString &projectId, const QString &eventId,
@@ -67,8 +70,9 @@ public:
     Q_INVOKABLE QVariantMap reportAnalysisInput(const QString &reportId) const;
     Q_INVOKABLE QVariantMap exportReport(const QString &eventId);
     Q_INVOKABLE QUrl reportUrl(const QString &reportId) const;
-    Q_INVOKABLE QString reportHtml(const QString &reportId) const;
-    Q_INVOKABLE QVariantMap exportReportPdf(const QString &reportId, const QUrl &file) const;
+    Q_INVOKABLE QString reportHtml(const QString &reportId, const QString &templateId = {}) const;
+    Q_INVOKABLE QVariantMap exportReportPdf(const QString &reportId, const QUrl &file,
+                                               const QString &templateId = {}) const;
 
 signals:
     void changed();

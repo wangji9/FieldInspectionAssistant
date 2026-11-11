@@ -4,6 +4,7 @@ import argparse
 import csv
 import json
 import math
+import shutil
 import struct
 import subprocess
 import wave
@@ -104,15 +105,53 @@ def make_samples(folder):
     return files
 
 
-def make_steps(root, files, hardware):
+def use_public_media(files, source):
+    folder = files["image"].parent
+    public_names = {
+        "image": ("pump-frame.jpg", "公开实录_齿轮泵视频截图.jpg"),
+        "video": ("pump-cavitation.mp4", "公开实录_齿轮泵气蚀试验.mp4"),
+        "audio": ("pump-motor.wav", "公开实录_独立泵声.wav"),
+    }
+    for kind, (original, name) in public_names.items():
+        files[kind] = folder / name
+        shutil.copyfile(source / original, files[kind])
+    files["matrix"] = folder / "模拟_轴承座80x60-celsius.csv"
+    with files["matrix"].open("w", encoding="utf-8", newline="") as output:
+        rows = csv.writer(output)
+        for y in range(60):
+            rows.writerow(f"{31.0 + 36.4 * math.exp(-((x-49)/8.0)**2 - ((y-31)/7.5)**2):.4f}" for x in range(80))
+    files["signal"] = folder / "派生_泵声音量包络.csv"
+    with wave.open(str(files["audio"]), "rb") as sound, files["signal"].open("w", encoding="utf-8", newline="") as output:
+        writer = csv.writer(output)
+        writer.writerow(("time_s", "audio_envelope_rms_fs"))
+        window = sound.getframerate() // 100
+        for index in range(sound.getnframes() // window):
+            samples = struct.unpack(f"<{window}h", sound.readframes(window))
+            rms = math.sqrt(sum((sample / 32768) ** 2 for sample in samples) / window)
+            writer.writerow((f"{index / 100:.2f}", f"{rms:.7f}"))
+    files["text"].write_text(
+        "培训演示。公开视频与泵声来自不同设备，时间轴为演示编排，并非现场同步测量。"
+        "图像取自同一公开试验视频，包络取自同一录音，均非独立佐证。\n"
+        "视频：Sir Balefire，齿轮泵气蚀台架试验，CC0 1.0。"
+        "泵声：ezwa / PDSounds，公有领域。\n"
+        "演示场景：P-101 驱动端轴承座。模拟温度矩阵峰值 67.4 °C；模拟巡检录入振动 6.4 mm/s。"
+        "样例复查线 60 °C 和 4.5 mm/s，只用于培训。模拟读数与公开视频、声音没有实物关联。\n"
+        "视频来源：https://commons.wikimedia.org/wiki/File:Cavitation_in_a_gear_pump.ogv\n"
+        "音频来源：https://commons.wikimedia.org/wiki/File:Pump.ogg\n", encoding="utf-8",
+    )
+    return files
+
+
+def make_steps(root, files, hardware, public=False):
     steps = []
     directory = root / "work"
     exports = root / "exports"
     exports.mkdir()
     (exports / "copies").mkdir()
     directory.mkdir()
-    name = "设备巡检演示"
-    description = "循环水泵 P-101 轴承座温升与振动复检。现场资料为培训样本，AI 分析由板端模型实际运行。"
+    name = "泵组多模态巡检演示" if public else "设备巡检演示"
+    description = ("公开齿轮泵试验、独立泵声与模拟巡检数据的培训案例。统一演示时间轴，非现场同步测量。"
+                   if public else "循环水泵 P-101 轴承座温升与振动复检。现场资料为培训样本，AI 分析由板端模型实际运行。")
     project = "App.projects"
     source = directory / (name + ".miproj")
 
@@ -129,7 +168,7 @@ def make_steps(root, files, hardware):
         step(label, f"var r={expression}; if (!r.ok) throw new Error(r.error); {after} true")
 
     step("empty-overview", "auditWindow.width=1536; auditWindow.height=864; auditWindow.showNormal(); "
-         "if (!App.session.setupAdministrator('project-demo-qa','IsolatedTrainingWorkspace1')) "
+         "if (!App.session.setupAdministrator('project-demo-qa','IsolatedTrainingWorkspace1',true)) "
          "throw new Error(App.session.message); App.nav.push('projects'); true")
     call("create", f"{project}.createProject({js(name)}, {js(directory.as_uri())})")
     call("save", f"{project}.saveProject({js(name)}, {js(description)})")
@@ -146,6 +185,15 @@ def make_steps(root, files, hardware):
         {"key": "vibration", "name": "径向振动有效值", "type": "measure", "unit": "mm/s", "max": 4.5},
     ]}}
     call("operations-asset", "App.assets.createAsset('DEMO-P101','演示循环水泵','演示泵房 A','P-101')")
+    point_name = "驱动端轴承座"
+    component = f"App.workspace.options('components',{{asset_id:{asset}}})[0].id"
+    point_id = f"App.workspace.options('points',{{asset_id:{asset}}}).find(row => row.name === {js(point_name)}).id"
+    call("operations-component", f"App.workspace.save('components',{{asset_id:{asset},name:'驱动端轴承',position:'泵组驱动端'}})")
+    call("operations-point", f"App.workspace.save('points',{{component_id:{component},code:'DE-BRG',"
+         f"name:{js(point_name)},position:'轴承座外表面',operating_condition:'模拟稳定运行'}})")
+    for metric, unit, maximum in (("轴承座温度", "°C", "60"), ("径向振动有效值", "mm/s", "4.5")):
+        call("operations-baseline-" + ("temp" if unit == "°C" else "vibration"), f"App.workspace.save('baselines',{{point_id:{point_id},"
+             f"metric:{js(metric)},unit:{js(unit)},maximum:{js(maximum)},operating_condition:'模拟稳定运行',reference:'培训样例基准'}})")
     call("operations-task", "App.workspace.save('tasks', {name:" + js(task_name)
          + f",asset_id:{asset},assignee_id:App.session.userId,planned_at:new Date().toISOString(),"
          + "template_snapshot:" + js(json.dumps(template, ensure_ascii=False)) + "})")
@@ -154,6 +202,10 @@ def make_steps(root, files, hardware):
     for key, value in (("temperature", "67.4"), ("vibration", "6.4")):
         call(f"operations-{key}", f"App.inspection.saveItem({record}, {js(key)}, 'normal', {js(value)}, '模拟读数')",
              "if (!r.abnormal) throw new Error('超出样例阈值应标为异常');")
+    for key, metric, unit, value in (("temp","轴承座温度","°C","67.4"), ("vibration","径向振动有效值","mm/s","6.4")):
+        call(f"operations-reading-{key}", f"App.workspace.linkEvidence({{record_id:{record},point_id:{point_id},"
+             f"kind:'reading',title:{js('模拟'+metric)},metadata:{{metric:{js(metric)},value:{js(value)},unit:{js(unit)},"
+             "operating_condition:'模拟稳定运行'}})")
     check("operations-unlinked-blocked", f"!App.inspection.completeTask({task}).ok")
     call("operations-defect", f"App.defects.createDefect({record},{asset},{js(defect_title)},'同工况复测，检查对中','high','temperature')")
     call("operations-defect-signal", f"App.defects.createDefect({record},{asset},'演示：径向振动异常','复测与温升异常的关联','medium','vibration')")
@@ -163,18 +215,30 @@ def make_steps(root, files, hardware):
     call("operations-assign", f"App.defects.assign({defect},App.session.userId,'','演示整改')")
     call("operations-repair", f"App.defects.start({defect},'同工况复检')")
     call("operations-feedback", f"App.defects.submitFeedback({defect},'模拟复测 51.2 °C，2.9 mm/s')")
+    call("operations-return", f"App.defects.review({defect},false,'复核退回，补充复测读数')")
+    check("returned-state", f"App.workflow.detail('defects',{defect}).selected_defect.returned === true")
+    step("returned-progress", f"App.nav.push('operations',{{view:'defects',asset_id:{asset},source_id:{defect}}}); true",
+         captureWindow="inspectionDetailWindow")
+    call("operations-resubmit", f"App.defects.submitFeedback({defect},'补充模拟复测记录 51.2 °C，2.9 mm/s')")
     call("operations-review", f"App.defects.review({defect},true,'温升缺陷演示闭环，另一条振动缺陷待复核')")
+    step("closed-progress", "true", captureWindow="inspectionDetailWindow")
     formal_json = exports / "演示_现场执行与复核.json"
     formal_pdf = exports / "泵组现场执行与复核.pdf"
     call("operations-confirm", f"App.workspace.confirmReport({record},'培训演示。温升异常已按样例复检，径向振动缺陷仍需跟踪。','',0)")
     report = f"App.workspace.report({record}).id"
     call("operations-export-json", f"App.workspace.exportReport({report},{js(str(formal_json))},'json')")
     call("operations-export-pdf", f"App.workspace.exportReport({report},{js(str(formal_pdf))},'pdf')")
-    for index, kind in enumerate(("image", "thermal", "audio", "signal", "video", "text", "review", "standby")):
+    kinds = ["image", "thermal", "audio", "signal", "video", "text", "review", "standby"]
+    if public:
+        kinds.append("matrix")
+    for index, kind in enumerate(kinds):
         other = kind == "standby"
         point = "驱动端轴承座" if not other else "设备铭牌"
-        actual_kind = "text" if kind in {"review", "standby"} else kind
+        actual_kind = "text" if kind in {"review", "standby"} else "thermal" if kind == "matrix" else kind
         time = f"2026-11-08T10:00:{index * 4:02}+08:00" if index < 6 else f"2026-11-08T10:15:{index:02}+08:00"
+        if public and kind not in {"review", "standby"}:
+            seconds = {"image":3, "thermal":4, "matrix":4, "audio":6, "signal":6, "video":0, "text":12}[kind]
+            time = f"2026-11-08T10:00:{seconds:02}.250+08:00"
         call(f"attach-{kind}", f"{project}.importEvidence({js(files[kind].as_uri())},"
              f" {project}.devices[{int(other)}].id, {js(point)}, {js(actual_kind)}, {js(time)})")
 
@@ -186,24 +250,40 @@ def make_steps(root, files, hardware):
     check("fusion-deduplicates", f"{project}.fuse({evidence('thermal')}.id).id === {project}.events[0].id && {project}.events.length === 1")
     check("evidence-preview", f"{project}.evidenceFile({evidence('thermal')}.id).image"
           f" && {project}.evidenceFile({evidence('text')}.id).text.includes('67.4')")
+    call("attach-inspection", f"{project}.linkInspection({project}.events[0].id,{record})")
+    call("attach-defect", f"{project}.linkDefect({project}.events[0].id,{defect})")
+    timeline = f"{project}.eventTimeline({project}.events[0].id)"
+    check("aligned-timeline", f"{timeline}.length === {7 if public else 6} && {timeline}.every(row => row.timeUtc.endsWith('Z') && row.source === 'declared_offset')")
+    check("measured-evidence", f"{timeline}.some(row => row.kind === 'audio' && row.metrics.rms > 0)"
+          f" && {timeline}.some(row => row.kind === 'signal' && row.metrics.sample_count > 0)")
+    if public:
+        check("measured-temperature-matrix", f"{timeline}.some(row => row.metrics.source === 'temperature_matrix' && row.metrics.maximum === 67.4)")
     step("analysis-service", "App.projectInference.refresh(); true", until="App.projectInference.ready", timeout=12000)
-    step("rk1828-analysis", f"App.nav.push('fusion'); App.projectInference.analyze({project}.events[0].id); true",
-         until=f"{project}.findingForEvent({project}.events[0].id).length > 20", timeout=165000)
+    step("rk1828-analysis", f"App.nav.push('projectDiagnosis',{{event_id:{project}.events[0].id}}); App.projectInference.analyze({project}.events[0].id); true",
+         until=f"{project}.findingForEvent({project}.events[0].id).length > 20", timeout=270000)
+    check("persisted-video-observation", f"{timeline}.some(row => row.kind === 'video' && row.observation.frame_offsets_ms.length === 3)")
+    step("event-graph", f"App.nav.push('projectGraph',{{event_id:{project}.events[0].id,device_id:{project}.devices[0].id}}); true")
+    check("graph-relations", f"['record:', 'defect:', 'finding:'].every(prefix => "
+          f"{project}.evidenceGraph('',{project}.events[0].id).nodes.some(node => node.id.startsWith(prefix)))")
     call("attach-confirmed-report", f"{project}.importEvidence({js(formal_json.as_uri())},"
          f" {project}.devices[0].id,'驱动端轴承座','text','2026-11-08T10:17:00+08:00')")
     call("markdown", f"{project}.exportReport({project}.events[0].id)", "App.nav.push('reports');")
     call("pdf", f"{project}.exportReportPdf({project}.reports[0].id, {js((exports / '泵组巡检演示报告.pdf').as_uri())})")
+    for template_id, filename in (("brief", "巡检事件摘要.pdf"), ("followup", "缺陷整改跟踪报告.pdf")):
+        call("pdf-" + template_id, f"{project}.exportReportPdf({project}.reports[0].id, {js((exports / filename).as_uri())},{js(template_id)})")
     check("reject-invalid-import", f"!{project}.importProject({js(exports.as_uri())}).ok && {project}.project.name === {js(name)}")
     step("close", f"{project}.closeProject(); true")
     call("reopen", f"{project}.openProject({js(source.as_uri())})", "App.nav.push('projects');")
-    check("complete-overview", f"{project}.evidence.length === 9 && {project}.reports.length === 1")
+    check("complete-overview", f"{project}.evidence.length === {10 if public else 9} && {project}.reports.length === 1")
+    check("observations-survive-reopen", f"{timeline}.some(row => row.kind === 'video' && row.observation.frame_offsets_ms.length === 3)")
+    check("report-survives-reopen", f"{project}.reportHtml({project}.reports[0].id,'followup').includes('缺陷整改跟踪报告')")
     step("compact-overview", "auditWindow.width=980; auditWindow.height=620; true")
     step("overview-full", "auditWindow.width=1536; auditWindow.height=864; true")
     step("overview-evidence-bar", "true", tapObject="projectEvidenceBar-thermal")
     check("overview-evidence-route", "App.nav.page === 'projectEvidence'")
     call("export-project", f"{project}.copyProject({js(exports.as_uri())}, '', '', true)")
     call("import-project", f"{project}.importProject({js(source.as_uri())})")
-    check("imported-evidence", f"{project}.evidence.length === 9 && {project}.reports.length === 1"
+    check("imported-evidence", f"{project}.evidence.length === {10 if public else 9} && {project}.reports.length === 1"
           f" && {project}.project.path !== {js(str(source))}")
     call("save-as", f"{project}.copyProject({js((exports / 'copies').as_uri())}, '另存演示', '副本验收', false)")
     step("wav-analysis", f"App.nav.push('analysis', {{analysis_tab:0}}); App.analysis.refresh(); true")
@@ -234,6 +314,9 @@ def make_steps(root, files, hardware):
         step("raw-mic-start", "App.analysis.start('ListenGo_raw_six'); true",
              until="App.analysis.summary.capture_frames >= 16000 && App.analysis.summary.channels === 6", timeout=10000)
         step("raw-mic-stop", "App.analysis.stop(); true", until="!App.analysis.running", timeout=5000)
+    if public:
+        call("restore-demo-project", f"{project}.openProject({js(source.as_uri())})")
+        step("demo-landing", "App.nav.push('projects'); true")
     step("report-preview", "auditWindow.showReport(); true")
     (root / "steps.json").write_text(json.dumps(steps, ensure_ascii=False), encoding="utf-8")
 
@@ -242,5 +325,9 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("root", type=Path)
     parser.add_argument("--hardware", action="store_true")
+    parser.add_argument("--public-media", type=Path, help="directory with converted video, extracted photo and PCM WAV")
     args = parser.parse_args()
-    make_steps(args.root.resolve(), make_samples(args.root.resolve() / "samples"), args.hardware)
+    files = make_samples(args.root.resolve() / "samples")
+    if args.public_media:
+        files = use_public_media(files, args.public_media)
+    make_steps(args.root.resolve(), files, args.hardware, bool(args.public_media))

@@ -204,12 +204,13 @@ Window {
     }
     function showReport() {
         App.nav.push("reports")
-        reportDialog.body = App.projects.reportHtml(pageProject.selectedReport)
+        reportDialog.body = App.projects.reportHtml(pageProject.selectedReport, pageProject.reportTemplate)
         if (reportDialog.body) reportDialog.open()
         else commandNotice = "报告文件不可访问"
     }
     function exportPdf() {
         pdfPicker.reportId = pageProject.selectedReport
+        pdfPicker.templateId = pageProject.reportTemplate
         pdfPicker.open()
     }
     function rk1828() {
@@ -488,12 +489,13 @@ Window {
     FileDialog {
         id: pdfPicker
         property string reportId
+        property string templateId
         title: "导出 PDF"
         fileMode: FileDialog.SaveFile
         defaultSuffix: "pdf"
         nameFilters: ["PDF 文件 (*.pdf)"]
         onAccepted: {
-            const result = App.projects.exportReportPdf(reportId, selectedFile)
+            const result = App.projects.exportReportPdf(reportId, selectedFile, templateId)
             rootWindow.commandNotice = result.ok ? "PDF 已导出：" + result.path : result.error
         }
     }
