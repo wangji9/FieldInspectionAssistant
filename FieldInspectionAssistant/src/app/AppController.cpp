@@ -81,9 +81,9 @@ bool AppController::start() {
     if (!db_->seedDemoDataIfEmpty(&err)) {
         qWarning().noquote() << QStringLiteral("种子数据初始化失败:") << err;
     }
-    // Password authentication is completed by LoginPage. No implicit account switch.
-    defects_->setCurrentActor(session_->userId());db_->setActor(session_->userId(),session_->userName());
-    refreshModels();
+    session_->restoreLocalLogin();
+    if (!session_->loggedIn())
+        refreshModels();
     started_ = true;
     emit startedChanged();
     return true;

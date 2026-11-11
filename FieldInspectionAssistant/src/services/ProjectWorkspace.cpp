@@ -1,4 +1,5 @@
 #include "ProjectWorkspace.h"
+#include "ProjectEvidenceMetrics.h"
 #include "AccessPolicy.h"
 #include "../app/SessionManager.h"
 #include "../database/DatabaseManager.h"
@@ -151,6 +152,50 @@ QString classificationLabel(const QString &value)
     if (value == "abnormal") return QStringLiteral("异常");
     return QStringLiteral("待判定");
 }
+
+QString readingVerdict(const QSqlDatabase &database,const QString &recordId,const QString &point)
+{
+    if (recordId.isEmpty())
+        return {};
+    QSqlQuery readings(database);
+    readings.prepare("SELECT e.metadata FROM product_evidence e JOIN measurement_points p ON p.id=e.point_id "
+                     "WHERE e.record_id=? AND p.name=? AND e.kind='reading' AND e.deleted_at=''");
+    readings.addBindValue(recordId);
+    readings.addBindValue(point);
+    if (!readings.exec())
+        return {};
+    bool comparable=false, incomplete=false;
+    while (readings.next()) {
+        const auto row=QJsonDocument::fromJson(readings.value(0).toByteArray()).object();
+        const auto result=row.value("assessment").toObject();
+        if (result.value("baseline_id").toString().isEmpty()) {
+            incomplete=true;
+            continue;
+        }
+        const auto state=result.value("state").toString();
+        if (state=="abnormal")
+            return QStringLiteral("abnormal");
+        if (state=="within_baseline")
+            comparable=true;
+        else
+            incomplete=true;
+    }
+    if (!comparable || incomplete)
+        return {};
+    QSqlQuery checks(database);
+    checks.prepare("SELECT COUNT(*) FROM inspection_check_items WHERE record_id=? AND is_abnormal=1");
+    checks.addBindValue(recordId);
+    return checks.exec() && checks.next() && checks.value(0).toInt()==0 ? QStringLiteral("normal") : QString();
+}
+
+bool storeRule(QSqlDatabase database,const QString &eventId,const QString &verdict)
+{
+    if (verdict.isEmpty())
+        return execute(database,"DELETE FROM project_event_rules WHERE event_id=?",{eventId});
+    return execute(database,"INSERT INTO project_event_rules VALUES(?,?) "
+                            "ON CONFLICT(event_id) DO UPDATE SET classification=excluded.classification",
+                   {eventId,verdict});
+}
 }
 
 ProjectWorkspace::ProjectWorkspace(DatabaseManager *business, SessionManager *session, QObject *parent)
@@ -161,7 +206,34 @@ ProjectWorkspace::ProjectWorkspace(DatabaseManager *business, SessionManager *se
 }
 
 ProjectWorkspace::~ProjectWorkspace() { release(); }
-bool ProjectWorkspace::ready() const { return session_->loggedIn() && db_.isOpen(); }
+bool ProjectWorkspace::ready() const { return db_.isOpen() && AccessPolicy(business_,session_).authenticated(); }
+bool ProjectWorkspace::canReadLinkedRecord(const QString &recordId) const
+{
+    if (recordId.isEmpty())
+        return true;
+    const AccessPolicy access(business_,session_);
+    if (access.record(recordId))
+        return true;
+    // A manager can inspect a transferred project whose original business records are absent.
+    if (!access.manages())
+        return false;
+    QSqlQuery query(business_->connection());
+    query.prepare("SELECT 1 FROM inspection_records WHERE id=?");
+    query.addBindValue(recordId);
+    return query.exec() && !query.next();
+}
+
+bool ProjectWorkspace::canReadEvent(const QString &eventId) const
+{
+    const auto result=rows("SELECT d.record_id,s.record_id AS source_record FROM fusion_events f "
+                           "LEFT JOIN project_event_details d ON d.event_id=f.id "
+                           "LEFT JOIN project_evidence_records s ON s.evidence_id=f.anchor_id WHERE f.id=?", {eventId});
+    if (result.isEmpty())
+        return false;
+    const auto row=result.first().toMap();
+    return canReadLinkedRecord(row.value("record_id").toString()) &&
+           canReadLinkedRecord(row.value("source_record").toString());
+}
 void ProjectWorkspace::release() { closeDatabase(db_); project_.clear(); }
 
 QVariantMap ProjectWorkspace::createProject(const QString &name, const QUrl &parentFolder)
@@ -232,6 +304,10 @@ QVariantMap ProjectWorkspace::openProject(const QUrl &folder)
                             "event_id TEXT PRIMARY KEY REFERENCES fusion_events(id),defect_id TEXT NOT NULL)") ||
         !execute(candidate, "CREATE TABLE IF NOT EXISTS project_evidence_records("
                             "evidence_id TEXT PRIMARY KEY REFERENCES evidence(id),record_id TEXT NOT NULL)") ||
+        !execute(candidate, "CREATE TABLE IF NOT EXISTS project_evidence_metrics("
+                            "evidence_id TEXT PRIMARY KEY REFERENCES evidence(id),metrics TEXT NOT NULL)") ||
+        !execute(candidate, "CREATE TABLE IF NOT EXISTS project_event_rules("
+                            "event_id TEXT PRIMARY KEY REFERENCES fusion_events(id),classification TEXT NOT NULL)") ||
         !candidate.commit()) {
         candidate.rollback();
         closeDatabase(candidate);
@@ -243,7 +319,7 @@ QVariantMap ProjectWorkspace::openProject(const QUrl &folder)
     rememberProject();
     log(tr("打开工程"), data.value("name").toString());
     emit changed();
-    return success();
+    return transferStatus();
 }
 
 QVariantMap ProjectWorkspace::importProject(const QUrl &folder)
@@ -286,6 +362,35 @@ QVariantMap ProjectWorkspace::importProject(const QUrl &folder)
         log(tr("导入工程"), project_.value("name").toString());
         emit changed();
     }
+    return result;
+}
+
+QVariantMap ProjectWorkspace::transferStatus() const
+{
+    QStringList missing;
+    const QList<QStringList> links={
+        {"SELECT asset_id AS id FROM project_device_links","assets","设备"},
+        {"SELECT record_id AS id FROM project_evidence_records UNION SELECT record_id FROM project_event_details","inspection_records","巡检记录"},
+        {"SELECT defect_id AS id FROM project_event_defects","defects","缺陷"}
+    };
+    for (const auto &link:links) {
+        QSqlQuery query(business_->connection());
+        query.prepare("SELECT 1 FROM "+link[1]+" WHERE id=?");
+        int count=0;
+        for (const auto &value:rows(link[0])) {
+            const auto id=value.toMap().value("id").toString();
+            if (id.isEmpty())
+                continue;
+            query.bindValue(0,id);
+            if (query.exec() && !query.next())
+                ++count;
+        }
+        if (count)
+            missing.append(tr("%1 %2 项").arg(link[2]).arg(count));
+    }
+    QVariantMap result=success();
+    if (!missing.isEmpty())
+        result["warning"]=tr("当前业务库缺少关联对象（%1）。完整移交请使用原板的业务备份。").arg(missing.join("、"));
     return result;
 }
 
@@ -357,6 +462,11 @@ QVariantMap ProjectWorkspace::copyProject(const QUrl &folder, const QString &nam
 {
     if (!ready())
         return failure(tr("请先打开工程。"));
+    const auto scopes=rows("SELECT record_id FROM project_evidence_records UNION SELECT record_id FROM project_event_details");
+    for (const auto &scope:scopes) {
+        if (!canReadLinkedRecord(scope.toMap().value("record_id").toString()))
+            return failure(tr("工程含有当前账号无权访问的巡检资料，请由有权人员执行完整归档或另存。"));
+    }
     const auto result = writeProjectCopy(db_, project_, folder, name, description, archive);
     if (!result.value("ok").toBool())
         return result;
@@ -472,31 +582,39 @@ QVariantList ProjectWorkspace::evidence() const
         auto row = entry.toMap();
         const auto record = row.value("record_id").toString();
         if (record.isEmpty()) continue;
-        if (!visibleRecords.contains(record)) visibleRecords.insert(record, access.record(record));
-        if (!visibleRecords.value(record)) {
-            row.remove("record_id");
-            entry = row;
-        }
+        if (!visibleRecords.contains(record)) visibleRecords.insert(record, canReadLinkedRecord(record));
+        if (!visibleRecords.value(record))
+            entry.clear();
     }
+    evidence.removeAll(QVariant());
     return evidence;
 }
 QVariantList ProjectWorkspace::events() const
 {
     auto result = rows("SELECT f.id,f.created_at,COALESCE(n.title,e.title) title,d.name device,e.point,e.device_id,f.anchor_id, "
-                       "m.record_id, l.asset_id,m.ai_result,m.review_result,x.defect_id,"
-                       "n.source,n.note, COALESCE(n.observed_ms,e.captured_ms) observed_ms,"
+                       "m.record_id, l.asset_id,m.ai_result,m.review_result,r.classification rule_result,x.defect_id,"
+                       "n.source,n.note,n.classification AS manual_result, COALESCE(n.observed_ms,e.captured_ms) observed_ms,"
                        "datetime(COALESCE(n.observed_ms,e.captured_ms)/1000,'unixepoch','localtime') observed,"
-                       "COALESCE(m.review_result,NULLIF(n.classification,'unknown'),m.ai_result,'unknown') classification,"
+                       "COALESCE(m.review_result,NULLIF(n.classification,'unknown'),r.classification,'unknown') classification,"
                        "EXISTS(SELECT 1 FROM ai_findings a WHERE a.event_id=f.id) analyzed FROM fusion_events f "
                        "JOIN evidence e ON e.id=f.anchor_id JOIN devices d ON d.id=e.device_id "
                        "LEFT JOIN project_event_details m ON m.event_id=f.id "
+                       "LEFT JOIN project_event_rules r ON r.event_id=f.id "
                        "LEFT JOIN project_manual_events n ON n.event_id=f.id "
                        "LEFT JOIN project_event_defects x ON x.event_id=f.id "
                        "LEFT JOIN project_device_links l ON l.device_id=e.device_id ORDER BY observed_ms DESC,f.id");
     const AccessPolicy access(business_, session_);
     for (auto &value : result) {
         auto row = value.toMap();
+        if (!canReadEvent(row.value("id").toString())) {
+            value.clear();
+            continue;
+        }
         row["classificationLabel"] = classificationLabel(row.value("classification").toString());
+        const auto manual=row.value("manual_result").toString();
+        if (row.value("review_result").toString().isEmpty() && (manual.isEmpty() || manual=="unknown") &&
+            !row.value("rule_result").toString().isEmpty())
+            row["classificationLabel"]=tr("基准%1").arg(row.value("classificationLabel").toString());
         if (!row.value("record_id").toString().isEmpty() && !access.record(row.value("record_id").toString())) {
             row.remove("record_id");
             row.remove("asset_id");
@@ -505,9 +623,14 @@ QVariantList ProjectWorkspace::events() const
             row.remove("defect_id");
         value = row;
     }
+    result.removeAll(QVariant());
     return result;
 }
-QVariantList ProjectWorkspace::reports() const { return rows("SELECT * FROM reports ORDER BY created_at DESC,rowid DESC"); }
+QVariantList ProjectWorkspace::reports() const {
+    auto reports=rows("SELECT * FROM reports ORDER BY created_at DESC,rowid DESC");
+    reports.removeIf([this](const auto &report){return !canReadEvent(report.toMap().value("event_id").toString());});
+    return reports;
+}
 QVariantList ProjectWorkspace::logs() const
 {
     return rows("SELECT action,detail,time FROM activity ORDER BY id DESC LIMIT 200");
@@ -515,10 +638,13 @@ QVariantList ProjectWorkspace::logs() const
 
 QVariantMap ProjectWorkspace::evidenceFile(const QString &evidenceId) const
 {
-    const auto found = rows("SELECT title,path,kind FROM evidence WHERE id=?", {evidenceId});
+    const auto found = rows("SELECT e.title,e.path,e.kind,s.record_id FROM evidence e LEFT JOIN "
+                            "project_evidence_records s ON s.evidence_id=e.id WHERE e.id=?", {evidenceId});
     if (found.isEmpty())
         return {};
     auto item = found.first().toMap();
+    if (!canReadLinkedRecord(item.take("record_id").toString()))
+        return {};
     const QDir dir(project_.value("path").toString());
     const auto path = item.take("path").toString();
     if (!managedFile(dir, path))
@@ -626,6 +752,8 @@ QVariantMap ProjectWorkspace::importEvidence(const QUrl &file, const QString &de
     const auto output = dir.filePath(relative);
     if (!QFile::copy(source.absoluteFilePath(), output))
         return failure(tr("证据文件复制失败。"));
+    const auto catalog=QFileInfo(business_->databasePath()).absoluteDir().filePath("measurements/measurements.sqlite");
+    const auto metrics=projectEvidenceMetrics(kind,output,source.absoluteFilePath(),catalog);
     if (!db_.transaction()) {
         QFile::remove(output);
         return failure(tr("无法启动证据保存。"));
@@ -633,6 +761,8 @@ QVariantMap ProjectWorkspace::importEvidence(const QUrl &file, const QString &de
     if (!execute(db_, "INSERT INTO evidence(id,device_id,point,kind,title,path,captured_ms) VALUES(?,?,?,?,?,?,?)",
                  {id, device, point.trimmed(), kind, source.fileName(), relative, timestamp.toMSecsSinceEpoch()}) ||
         (!recordId.isEmpty() && !execute(db_, "INSERT INTO project_evidence_records VALUES(?,?)", {id, recordId})) ||
+        (!metrics.isEmpty() && !execute(db_, "INSERT INTO project_evidence_metrics VALUES(?,?)",
+              {id,QString::fromUtf8(QJsonDocument::fromVariant(metrics).toJson(QJsonDocument::Compact))})) ||
         !db_.commit()) {
         db_.rollback();
         QFile::remove(output);
@@ -680,11 +810,14 @@ QVariantMap ProjectWorkspace::evidenceGraph(const QString &device) const
     node("project", project_.value("name").toString(), tr("工程"), 0);
     const QMap<QString, QString> labels{{"image", tr("图像")}, {"audio", tr("声音")}, {"thermal", tr("热像")},
                                        {"video", tr("视频")}, {"signal", tr("信号")}, {"text", tr("文字")}};
-    const auto latest = rows("SELECT e.*,d.name device FROM evidence e JOIN devices d ON d.id=e.device_id "
+    const auto latest = rows("SELECT e.*,d.name device,s.record_id FROM evidence e JOIN devices d ON d.id=e.device_id "
+                             "LEFT JOIN project_evidence_records s ON s.evidence_id=e.id "
                              "WHERE (?='' OR e.device_id=?) ORDER BY e.captured_ms DESC,e.id LIMIT 36",
                              {device.isEmpty() ? QStringLiteral("") : device, device});
     for (const auto &value : latest) {
         const auto row = value.toMap();
+        if (!canReadLinkedRecord(row.value("record_id").toString()))
+            continue;
         const auto deviceNode = "device:" + row.value("device_id").toString();
         const auto point = row.value("point").toString();
         const auto pointNode = deviceNode + "/point:" + point;
@@ -704,6 +837,8 @@ QVariantMap ProjectWorkspace::evidenceGraph(const QString &device) const
     const auto eventRows = rows("SELECT id,anchor_id,evidence_ids FROM fusion_events ORDER BY created_at DESC,id LIMIT 36");
     for (const auto &value : eventRows) {
         const auto row = value.toMap();
+        if (!canReadEvent(row.value("id").toString()))
+            continue;
         const auto anchor = "evidence:" + row.value("anchor_id").toString();
         if (!added.contains(anchor))
             continue;
@@ -753,6 +888,7 @@ QVariantMap ProjectWorkspace::fuse(const QString &anchorId)
         return failure(tr("无法启动融合。"));
     if (!execute(db_, "INSERT INTO fusion_events VALUES(?,?,?,?)", {id, anchorId, linked, now()}) ||
         (!recordId.isEmpty() && !execute(db_, "INSERT INTO project_event_details(event_id,record_id) VALUES(?,?)", {id, recordId})) ||
+        !storeRule(db_,id,readingVerdict(business_->connection(),recordId,anchor.value("point").toString())) ||
         !db_.commit()) {
         db_.rollback();
         return failure(tr("融合事件保存失败。"));
@@ -764,21 +900,31 @@ QVariantMap ProjectWorkspace::fuse(const QString &anchorId)
 
 QVariantMap ProjectWorkspace::analysisInput(const QString &eventId) const
 {
-    const auto event = rows("SELECT evidence_ids FROM fusion_events WHERE id=?", {eventId});
+    if (!canReadEvent(eventId))
+        return failure(tr("当前账号无权查看事件，或事件已不存在。"));
+    const auto event = rows("SELECT f.evidence_ids,d.record_id FROM fusion_events f LEFT JOIN "
+                            "project_event_details d ON d.event_id=f.id WHERE f.id=?", {eventId});
     if (event.isEmpty())
         return failure(tr("请先选择融合事件。"));
     const auto json = event.first().toMap().value("evidence_ids").toString().toUtf8();
     QStringList lines;
     int excerptBudget = 1800;
     for (const auto id : QJsonDocument::fromJson(json).array()) {
-        const auto record = rows("SELECT e.kind,e.title,e.point,e.captured_ms,d.name FROM evidence e "
-                                 "JOIN devices d ON d.id=e.device_id WHERE e.id=?", {id.toString()});
+        const auto record = rows("SELECT e.kind,e.title,e.point,e.captured_ms,d.name,s.record_id,m.metrics FROM evidence e "
+                                 "JOIN devices d ON d.id=e.device_id "
+                                 "LEFT JOIN project_evidence_records s ON s.evidence_id=e.id "
+                                 "LEFT JOIN project_evidence_metrics m ON m.evidence_id=e.id WHERE e.id=?", {id.toString()});
         if (!record.isEmpty()) {
             const auto r = record.first().toMap();
-            lines << QStringLiteral("- [%1] %2 / %3 / %4 / %5").arg(
-                r.value("kind").toString(), r.value("name").toString(), r.value("point").toString(),
+            if (!canReadLinkedRecord(r.value("record_id").toString()))
+                return failure(tr("事件包含当前账号无权访问的证据。"));
+            lines << QStringLiteral("- [%1] %2 / %3 / %4 / %5 / %6").arg(
+                id.toString(),r.value("kind").toString(), r.value("name").toString(), r.value("point").toString(),
                 QDateTime::fromMSecsSinceEpoch(r.value("captured_ms").toLongLong(), Qt::UTC).toString(Qt::ISODate),
                 r.value("title").toString().simplified());
+            const auto metrics=r.value("metrics").toString();
+            if (!metrics.isEmpty())
+                lines << tr("  采集指标：%1").arg(metrics);
             if (r.value("kind").toString() == "text" && excerptBudget > 0) {
                 const auto excerpt = evidenceFile(id.toString()).value("text").toString()
                     .simplified().left(qMin(700, excerptBudget));
@@ -794,13 +940,41 @@ QVariantMap ProjectWorkspace::analysisInput(const QString &eventId) const
     const auto manual = rows("SELECT title,note FROM project_manual_events WHERE event_id=?", {eventId}).value(0).toMap();
     if (!manual.isEmpty())
         lines << tr("人工观察：%1 / %2").arg(manual.value("title").toString(), manual.value("note").toString());
+    const auto recordId=event.first().toMap().value("record_id").toString();
+    if (!recordId.isEmpty() && AccessPolicy(business_,session_).record(recordId)) {
+        QSqlQuery checks(business_->connection());
+        checks.prepare("SELECT item_key,item_name,value_text,unit,threshold_text,result FROM inspection_check_items "
+                       "WHERE record_id=? AND result<>'' ORDER BY item_key LIMIT 24");
+        checks.addBindValue(recordId);
+        if (checks.exec()) {
+            while (checks.next())
+                lines << tr("巡检项 [%1] %2，读数 %3 %4，标准 %5，结果 %6").arg(
+                    checks.value(0).toString(),checks.value(1).toString().left(100),
+                    checks.value(2).toString().left(60),checks.value(3).toString().left(20),
+                    checks.value(4).toString().left(100),checks.value(5).toString().left(60));
+        }
+        QSqlQuery readings(business_->connection());
+        readings.prepare("SELECT id,title,metadata FROM product_evidence WHERE record_id=? AND kind='reading' "
+                         "AND deleted_at='' ORDER BY created_at DESC LIMIT 12");
+        readings.addBindValue(recordId);
+        if (readings.exec()) {
+            while (readings.next()) {
+                const auto raw=QJsonDocument::fromJson(readings.value(2).toByteArray()).toVariant().toMap();
+                QVariantMap metric;
+                for (const auto *key:{"metric","value","unit","operating_condition","assessment"})
+                    metric.insert(key,raw.value(key));
+                lines << tr("巡检读数 [%1] %2：%3").arg(readings.value(0).toString(),
+                    readings.value(1).toString().left(100),QString::fromUtf8(QJsonDocument::fromVariant(metric).toJson(QJsonDocument::Compact)));
+            }
+        }
+    }
     return {{"ok", true}, {"summary", lines.join('\n')}};
 }
 
 QVariantMap ProjectWorkspace::saveFinding(const QString &projectId, const QString &eventId,
                                             const QString &text, const QString &model)
 {
-    if (!ready() || project_.value("id") != projectId || text.trimmed().isEmpty() || !db_.transaction())
+    if (project_.value("id") != projectId || text.trimmed().isEmpty() || !canReadEvent(eventId) || !db_.transaction())
         return failure(tr("当前工程已切换，或分析结果无法保存。"));
     if (!execute(db_, "INSERT INTO ai_findings VALUES(?,?,?,?,?)", {identifier(), eventId, text.trimmed(), model, now()}) ||
         !execute(db_, "INSERT INTO project_event_details(event_id,ai_result) VALUES(?,?) "
@@ -842,9 +1016,9 @@ QVariantList ProjectWorkspace::inspectionChoices(const QString &eventId) const
 QVariantMap ProjectWorkspace::linkInspection(const QString &eventId, const QString &recordId)
 {
     const AccessPolicy access(business_, session_);
-    if (!ready() || !access.permission("inspect") || !access.record(recordId))
+    if (!canReadEvent(eventId) || !access.permission("inspect") || !access.record(recordId))
         return failure(tr("请选择有权查看的巡检记录。"));
-    const auto targets = rows("SELECT e.device_id,l.asset_id,m.record_id,s.record_id evidence_record FROM fusion_events f JOIN evidence e ON e.id=f.anchor_id "
+    const auto targets = rows("SELECT e.device_id,e.point,l.asset_id,m.record_id,s.record_id evidence_record FROM fusion_events f JOIN evidence e ON e.id=f.anchor_id "
                               "LEFT JOIN project_device_links l ON l.device_id=e.device_id "
                               "LEFT JOIN project_evidence_records s ON s.evidence_id=e.id "
                               "LEFT JOIN project_event_details m ON m.event_id=f.id WHERE f.id=?", {eventId});
@@ -873,6 +1047,7 @@ QVariantMap ProjectWorkspace::linkInspection(const QString &eventId, const QStri
         (previous != recordId && !execute(db_, "DELETE FROM project_event_defects WHERE event_id=?", {eventId})) ||
         !execute(db_, "INSERT INTO project_event_details(event_id,record_id) VALUES(?,?) "
                       "ON CONFLICT(event_id) DO UPDATE SET record_id=excluded.record_id", {eventId, recordId}) ||
+        !storeRule(db_,eventId,readingVerdict(business_->connection(),recordId,target.value("point").toString())) ||
         !db_.commit()) {
         db_.rollback();
         return failure(tr("无法写入巡检关联。"));
@@ -910,7 +1085,7 @@ QVariantMap ProjectWorkspace::linkDefect(const QString &eventId, const QString &
 
 QVariantMap ProjectWorkspace::reviewEvent(const QString &eventId, const QString &value)
 {
-    if (!ready() || !session_->can("review") ||
+    if (!canReadEvent(eventId) || !session_->can("review") ||
         (value != "normal" && value != "abnormal" && value != "unknown"))
         return failure(tr("当前账号无权判定事件。"));
     if (!execute(db_, "INSERT INTO project_event_details(event_id,review_result) VALUES(?,?) "
@@ -961,6 +1136,8 @@ QVariantMap ProjectWorkspace::reportAnalysisInput(const QString &reportId) const
 
 QString ProjectWorkspace::findingForEvent(const QString &eventId) const
 {
+    if (!canReadEvent(eventId))
+        return {};
     const auto result = rows("SELECT body FROM ai_findings WHERE event_id=? ORDER BY rowid DESC LIMIT 1", {eventId});
     return result.isEmpty() ? QString() : result.first().toMap().value("body").toString();
 }
@@ -974,8 +1151,9 @@ QVariantMap ProjectWorkspace::exportReport(const QString &eventId)
                                "ORDER BY created_at DESC,rowid DESC LIMIT 1", {eventId});
     const auto finding = findings.isEmpty() ? QVariantMap() : findings.first().toMap();
     const auto details = rows("SELECT d.record_id,x.defect_id,COALESCE(n.observed_ms,e.captured_ms) observed_ms,"
-                              "COALESCE(d.review_result,NULLIF(n.classification,'unknown'),d.ai_result,'unknown') classification "
+                              "COALESCE(d.review_result,NULLIF(n.classification,'unknown'),r.classification,'unknown') classification "
                               "FROM fusion_events f LEFT JOIN project_event_details d ON d.event_id=f.id "
+                              "LEFT JOIN project_event_rules r ON r.event_id=f.id "
                               "JOIN evidence e ON e.id=f.anchor_id "
                               "LEFT JOIN project_manual_events n ON n.event_id=f.id "
                               "LEFT JOIN project_event_defects x ON x.event_id=f.id WHERE f.id=?", {eventId}).value(0).toMap();
@@ -1000,7 +1178,7 @@ QVariantMap ProjectWorkspace::exportReport(const QString &eventId)
         .arg(project_.value("name").toString(), now(), eventId,
              classificationLabel(details.value("classification").toString()), observed, links, event.value("summary").toString());
     report += finding.isEmpty() ? tr("本报告记录证据关联，未执行 AI 分析。\n")
-        : tr("模型：%1。输入为证据索引和可用的文本摘录。\n\n%2\n\n"
+        : tr("模型：%1。输入为证据索引、可用采集指标、巡检读数和文本摘录。\n\n%2\n\n"
              "AI 内容仅供复核参考，现场结论以巡检记录和人工复核为准。\n")
             .arg(finding.value("model").toString(), finding.value("body").toString());
     if (!writeFile(path, report.toUtf8()))
@@ -1016,8 +1194,8 @@ QVariantMap ProjectWorkspace::exportReport(const QString &eventId)
 
 QUrl ProjectWorkspace::reportUrl(const QString &reportId) const
 {
-    const auto result = rows("SELECT path FROM reports WHERE id=?", {reportId});
-    if (result.isEmpty())
+    const auto result = rows("SELECT path,event_id FROM reports WHERE id=?", {reportId});
+    if (result.isEmpty() || !canReadEvent(result.first().toMap().value("event_id").toString()))
         return {};
     const QDir dir(project_.value("path").toString());
     const auto relative = result.first().toMap().value("path").toString();

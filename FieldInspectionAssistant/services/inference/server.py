@@ -34,6 +34,9 @@ VIDEO_IDLE_SECONDS=10
 DATA=ROOT/'data'; DATA.mkdir(exist_ok=True)
 app=Flask(__name__); app.config['MAX_CONTENT_LENGTH']=32*1024*1024
 lock=threading.Lock(); jobs={}; worker=None; rk_worker=None; asr_worker=None; events=queue.Queue()
+submissions=queue.Queue(maxsize=8)
+submission_lock=threading.Lock()
+QUEUE_TIMEOUT_SECONDS=120
 vision_reservation={'token':'','until':0.0}
 updates=threading.Condition()
 profile_lock=threading.RLock()
@@ -111,7 +114,7 @@ def system_status():
     npu=''
     try: npu=Path('/sys/kernel/debug/rknpu/load').read_text().strip()
     except OSError: pass
-    return dict(**resident_pool.status(),models=rows,service='online',busy=lock.locked(),temperature_c=max(temps) if temps else None,
+    return dict(**resident_pool.status(),models=rows,service='online',busy=lock.locked(),queued=submissions.qsize(),temperature_c=max(temps) if temps else None,
         memory_available_mb=round(mem['MemAvailable']/1024),memory_total_mb=round(mem['MemTotal']/1024),
         disk_free_gb=round(disk.f_bavail*disk.f_frsize/1024**3,2),npu_load=npu,hardware='RK3588 + RK1828',
         sample_image=str(ROOT/'vendor/rknn-llm/examples/multimodal_model_demo/data/demo.jpg'),
@@ -148,12 +151,9 @@ def resident_specs(key):
 
 @contextmanager
 def performance_profile():
-    # Serialize governor ownership as well as hardware operations. A queued job
-    # must not restore the governors while background model loading is running.
+    # Serialize model loading with inference and exclusive face access.
     with profile_lock:
-        subprocess.run(['sudo','-n','/usr/bin/python3',str(ROOT/'perf_profile.py'),'enter'],check=True,timeout=5)
-        try:yield
-        finally:subprocess.run(['sudo','-n','/usr/bin/python3',str(ROOT/'perf_profile.py'),'leave'],timeout=5)
+        yield
 
 
 resident_pool=ResidentPool(ROOT,resident_specs,profile=performance_profile)
@@ -327,7 +327,6 @@ def execute(job,payload):
                 final.update(state='cancelled',message='已停止');return
         profile_acquired=True
         publish(job,metrics=dict(job['metrics'],preload_wait_ms=(time.monotonic()-prepare_wait)*1000))
-        subprocess.run(['sudo','-n','/usr/bin/python3',str(ROOT/'perf_profile.py'),'enter'],check=True,timeout=5)
         status=system_status(); selected=payload['model']; required=[selected]
         if selected=='qwen3vl': required.append('qwen3_encoder')
         if any(not row['ready'] for row in status['models'] if row['model'] in required):
@@ -349,19 +348,20 @@ def execute(job,payload):
         LOG.exception('Inference failed'); final.update(state='error',error=str(e),message='推理失败')
     finally:
         if profile_acquired:
-            try:
-                subprocess.run(['sudo','-n','/usr/bin/python3',str(ROOT/'perf_profile.py'),'leave'],timeout=5)
-            except Exception: LOG.exception('Could not restore performance governors')
-            finally:profile_lock.release()
+            profile_lock.release()
         metrics=dict(job['metrics']); metrics['request_ms']=(time.time()-job['created_at'])*1000
         final.update(finished_at=time.time(),metrics=metrics)
         saved=snapshot(job); saved.update(final)
-        try: (DATA/(job['id']+'.json')).write_text(json.dumps(saved,ensure_ascii=False,indent=2),encoding='utf-8')
+        path=DATA/(job['id']+'.json')
+        temporary=path.with_suffix('.tmp')
+        try:
+            temporary.write_text(json.dumps(saved,ensure_ascii=False,indent=2),encoding='utf-8')
+            temporary.replace(path)
         finally:
             lock.release()
             publish(job,**final)
 
-def submit(payload):
+def submit(payload,temporary_input=None):
     if payload.get('mode') not in ('text','encoder','vision','asr'): return None,('Invalid mode',400)
     model=payload.get('model') or DEFAULT_MODELS[payload['mode']]
     if MODEL_MODES.get(model)!=payload['mode']: return None,('模型与任务类型不匹配',400)
@@ -371,18 +371,53 @@ def submit(payload):
     if payload['mode']=='asr':payload['answer_limit']=0
     if payload['answer_limit']:payload['max_tokens']=4096
     payload['thinking']=False
-    if not lock.acquire(False): return None,('推理设备正忙，请等待当前任务完成',409)
-    if vision_reserved():
-        lock.release()
-        return None,('RK1828 正在进行人脸识别',409)
-    # Retain only the newest 100 jobs in RAM; results remain on disk.
-    for key in list(jobs)[:-99]: jobs.pop(key,None)
     job=dict(id=uuid.uuid4().hex,state='queued',text='',metrics={},message='等待推理',mode=payload['mode'],model=model,
         online=bool(payload.get('online',False)),thinking=bool(payload.get('thinking',False)),
         question=payload.get('question',''),input_path=payload.get('path',''),answer_limit=payload.get('answer_limit',0),max_tokens=payload.get('max_tokens',256),created_at=time.time())
-    jobs[job['id']]=job
-    threading.Thread(target=execute,args=(job,payload),daemon=True).start()
+    with submission_lock:
+        if submissions.full():
+            return None,('推理队列已满，请稍后重试',409)
+        finished=[key for key,item in jobs.items() if item['state'] in ('done','error','cancelled')]
+        for key in finished[:max(0,len(jobs)-99)]:
+            jobs.pop(key,None)
+        jobs[job['id']]=job
+        submissions.put_nowait((job,payload,temporary_input))
     return job,None
+
+
+def run_submissions():
+    while True:
+        job,payload,temporary_input=submissions.get()
+        try:
+            while job['state']=='queued':
+                if time.time()-job['created_at']>=QUEUE_TIMEOUT_SECONDS:
+                    with updates:
+                        if job['state']=='queued':
+                            publish(job,state='error',error='等待推理资源超时',message='等待推理资源超时',
+                                    finished_at=time.time())
+                    break
+                if not lock.acquire(timeout=.2):
+                    continue
+                if vision_reserved():
+                    lock.release()
+                    time.sleep(.2)
+                    continue
+                with updates:
+                    if job['state']!='queued':
+                        lock.release()
+                        break
+                    publish(job,state='running')
+                execute(job,payload)
+                break
+        except Exception:
+            LOG.exception('Could not finish inference job %s',job['id'])
+        finally:
+            if temporary_input:
+                try:
+                    temporary_input.unlink(missing_ok=True)
+                except OSError:
+                    LOG.warning('Could not remove the temporary image for %s',job['id'])
+            submissions.task_done()
 
 @app.get('/health')
 @app.get('/api/status')
@@ -484,8 +519,9 @@ def create_job():
 
 @app.get('/api/jobs/<job_id>')
 def get_job(job_id):
-    if job_id not in jobs: return jsonify(error='Job not found'),404
-    return jsonify(snapshot(jobs[job_id]))
+    job=jobs.get(job_id)
+    if job is None: return jsonify(error='Job not found'),404
+    return jsonify(snapshot(job))
 
 @app.get('/api/jobs/<job_id>/events')
 def job_events(job_id):
@@ -510,6 +546,10 @@ def cancel_job(job_id):
     job=jobs.get(job_id)
     if job is None: return jsonify(error='Job not found'),404
     if job['state'] in ('done','error','cancelled'): return jsonify(snapshot(job))
+    with updates:
+        if job['state']=='queued':
+            publish(job,state='cancelled',message='已取消排队',finished_at=time.time())
+            return jsonify(snapshot(job))
     if job['mode'] not in ('text','vision','asr'): return jsonify(error='当前处理不支持中断'),409
     if not job['text'] and job['mode']!='asr': return jsonify(error='正在准备模型，请在开始回答后停止'),409
     publish(job,message='正在停止')
@@ -533,7 +573,7 @@ def legacy_vision():
     try:
         encoded=payload.get('image','').split(',',1)[-1]
         image=DATA/(uuid.uuid4().hex+'.jpg'); image.write_bytes(base64.b64decode(encoded,validate=True))
-        job,error=submit(dict(mode='vision',path=str(image),question=payload.get('question','请描述图片'),max_tokens=payload.get('max_tokens',256),answer_limit=payload.get('answer_limit',0)))
+        job,error=submit(dict(mode='vision',path=str(image),question=payload.get('question','请描述图片'),max_tokens=payload.get('max_tokens',256),answer_limit=payload.get('answer_limit',0)),temporary_input=image)
         if error: return jsonify(message=error[0]),error[1]
         deadline=time.monotonic()+610
         while job['state'] in ('queued','running') and time.monotonic()<deadline: time.sleep(.1)
@@ -541,7 +581,7 @@ def legacy_vision():
         return jsonify(answer=job['text'],elapsed_ms=job['metrics']['request_ms'],metrics=job['metrics'])
     except Exception as e: return jsonify(message=str(e)),400
     finally:
-        if 'image' in locals() and ('job' not in locals() or job.get('state') in ('done','error')): image.unlink(missing_ok=True)
+        if 'image' in locals() and not locals().get('job'): image.unlink(missing_ok=True)
 
 def release_idle_video():
     while True:
@@ -554,5 +594,6 @@ def release_idle_video():
 
 if __name__=='__main__':
     logging.basicConfig(level=logging.INFO)
+    threading.Thread(target=run_submissions,daemon=True).start()
     threading.Thread(target=release_idle_video, daemon=True).start()
     app.run(host='127.0.0.1',port=1828,threaded=True)

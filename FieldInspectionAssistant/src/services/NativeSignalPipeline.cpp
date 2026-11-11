@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <numeric>
 #include <cstring>
+#include <limits>
 #include <sys/file.h>
 #include <poll.h>
 #include <termios.h>
@@ -20,6 +21,22 @@ constexpr double pi=3.14159265358979323846;
 QByteArray wavHeader(quint32 size,int fs,int channels){
     QByteArray h;QDataStream out(&h,QIODevice::WriteOnly);out.setByteOrder(QDataStream::LittleEndian);
     out.writeRawData("RIFF",4);out<<quint32(size+36);out.writeRawData("WAVEfmt ",8);out<<quint32(16)<<quint16(1)<<quint16(channels)<<quint32(fs)<<quint32(fs*channels*2)<<quint16(channels*2)<<quint16(16);out.writeRawData("data",4);out<<size;return h;
+}
+constexpr qint64 MaxWavData=std::numeric_limits<quint32>::max()-36;
+
+qint64 checkpointWav(QFile &file,int rate,int channels,bool final) {
+    const qint64 frameBytes=channels*2;
+    const qint64 payload=file.size()-44;
+    if (payload<0 || payload>MaxWavData)
+        return -1;
+    const qint64 complete=payload-payload%frameBytes;
+    if (final && payload!=complete && !file.resize(44+complete))
+        return -1;
+    const auto header=wavHeader(quint32(complete),rate,channels);
+    if (!file.seek(0) || file.write(header)!=header.size() || !file.flush()
+        || (final && ::fdatasync(file.handle())!=0) || !file.seek(file.size()))
+        return -1;
+    return complete/frameBytes;
 }
 struct Transform {
     int n;double *input;fftw_complex *output;fftw_plan plan;
@@ -79,11 +96,24 @@ QString title(const QString &method){static const QMap<QString,QString> names{{"
 }
 
 bool writePcmWav(const QString&path,const QByteArray&pcm,int fs,int channels){QSaveFile f(path);if(!f.open(QIODevice::WriteOnly))return false;return f.write(wavHeader(pcm.size(),fs,channels))==44&&f.write(pcm)==pcm.size()&&f.commit();}
+qint64 recoverCapturedWav(const QString &path,int rate,int channels) {
+    if (rate<4000 || rate>192000 || channels<1 || channels>8)
+        return -1;
+    QFile file(path);
+    if (!file.open(QIODevice::ReadWrite|QIODevice::Unbuffered) || flock(file.handle(),LOCK_EX|LOCK_NB)!=0)
+        return -1;
+    auto header=file.read(44);
+    const auto expected=wavHeader(0,rate,channels);
+    if (header.size()!=44 || header.left(4)!=expected.left(4) ||
+        header.mid(8,32)!=expected.mid(8,32) || file.size()<=44)
+        return -1;
+    return checkpointWav(file,rate,channels,true);
+}
 NativeAudioCapture::NativeAudioCapture(const QVariantMap&device,const QString&folder,QObject*parent):QThread(parent),device_(device),rate_(device["rate"].toInt()),channels_(device["channels"].toInt()){
     id_=QUuid::createUuid().toString(QUuid::WithoutBraces);QDir().mkpath(folder);path_=folder+"/"+QDateTime::currentDateTime().toString("yyyyMMdd_HHmmss")+"_"+id_.left(8)+".wav";ring_.resize(rate_*channels_*6);
 }
 NativeAudioCapture::~NativeAudioCapture(){requestInterruption();wait(3000);}
-QVariantMap NativeAudioCapture::info()const{QMutexLocker lock(&mutex_);return {{"id",id_},{"path",path_},{"source",device_["name"]},{"fs",rate_},{"channels",channels_},{"started",started_},{"duration",double(frames_.load())/rate_},{"frames",QVariant::fromValue(frames_.load())},{"xruns",QVariant::fromValue(xruns_.load())},{"packets",QVariant::fromValue(packets_.load())},{"checksum_errors",QVariant::fromValue(checksumErrors_.load())},{"transport",device_.value("transport","alsa")},{"error",error_},{"origin","sensor"}};}
+QVariantMap NativeAudioCapture::info()const{QMutexLocker lock(&mutex_);return {{"id",id_},{"path",path_},{"source",device_["name"]},{"fs",rate_},{"channels",channels_},{"started",started_},{"duration",double(frames_.load())/rate_},{"frames",QVariant::fromValue(frames_.load())},{"has_signal",hasSignal_.load()},{"finalized",finalized_.load()},{"xruns",QVariant::fromValue(xruns_.load())},{"packets",QVariant::fromValue(packets_.load())},{"checksum_errors",QVariant::fromValue(checksumErrors_.load())},{"transport",device_.value("transport","alsa")},{"error",error_},{"origin","sensor"}};}
 QByteArray NativeAudioCapture::latestPcm(double seconds)const{
     QMutexLocker lock(&mutex_);quint64 size=qMin(available_,quint64(rate_*channels_*seconds));size-=size%channels_;QByteArray result(size*2,Qt::Uninitialized);
     quint64 start=(write_+ring_.size()-size)%ring_.size(),first=qMin(size,quint64(ring_.size())-start);std::memcpy(result.data(),ring_.constData()+start,first*2);if(first<size)std::memcpy(result.data()+first*2,ring_.constData(),(size-first)*2);return result;
@@ -105,25 +135,32 @@ void NativeAudioCapture::run(){
     if(code<0){fail(QString::fromLocal8Bit(snd_strerror(code)));return;}
     code=snd_pcm_set_params(pcm,SND_PCM_FORMAT_S16_LE,SND_PCM_ACCESS_RW_INTERLEAVED,channels_,rate_,0,80000);
     if(code<0){fail(QString::fromLocal8Bit(snd_strerror(code)));snd_pcm_close(pcm);return;}
-    QFile file(path_);if(!file.open(QIODevice::WriteOnly|QIODevice::Unbuffered)){fail(file.errorString());snd_pcm_close(pcm);return;}file.write(wavHeader(0,rate_,channels_));
+    QFile file(path_);
+    if(!file.open(QIODevice::WriteOnly|QIODevice::NewOnly|QIODevice::Unbuffered)
+        || flock(file.handle(),LOCK_EX|LOCK_NB)!=0 || file.write(wavHeader(0,rate_,channels_))!=44){
+        fail("无法创建原始录音文件");snd_pcm_close(pcm);return;
+    }
     {QMutexLocker lock(&mutex_);started_=QDateTime::currentMSecsSinceEpoch()/1000.;}
     QVector<qint16> block(qMax(128,rate_/100)*channels_);QElapsedTimer timer,storage;timer.start();storage.start();
     while(!isInterruptionRequested()&&timer.elapsed()<300000){
         auto count=snd_pcm_readi(pcm,block.data(),block.size()/channels_);
         if(count==-EAGAIN){snd_pcm_wait(pcm,20);continue;}
         if(count<0){xruns_++;if(snd_pcm_recover(pcm,count,1)<0){fail(QString::fromLocal8Bit(snd_strerror(count)));break;}continue;}
-        if(!count)continue;const int samples=count*channels_;const int bytes=samples*2;
-        if(file.write(reinterpret_cast<const char*>(block.constData()),bytes)!=bytes){fail("录音写入失败");break;}
-        {QMutexLocker lock(&mutex_);quint64 first=qMin(quint64(samples),quint64(ring_.size())-write_);std::memcpy(ring_.data()+write_,block.constData(),first*2);if(first<quint64(samples))std::memcpy(ring_.data(),block.constData()+first,(samples-first)*2);write_=(write_+samples)%ring_.size();available_=qMin(quint64(ring_.size()),available_+samples);}
-        frames_+=count;sequence_++;
-        if(storage.elapsed()>5000){storage.restart();if(QStorageInfo(path_).bytesAvailable()<100*1024*1024){fail("剩余空间不足 100 MB");break;}}
+        if(!count)continue;
+        if(!appendPcm(file,reinterpret_cast<const char*>(block.constData()),count*channels_*2))break;
+        if(storage.elapsed()>5000){storage.restart();if(QStorageInfo(path_).bytesAvailable()<100*1024*1024){fail("剩余空间不足 100 MB");break;}if(checkpointWav(file,rate_,channels_,false)<0){fail("无法更新录音文件头");break;}}
     }
-    snd_pcm_drop(pcm);snd_pcm_close(pcm);auto size=file.size()-44;file.seek(0);file.write(wavHeader(qMax(qint64(0),size),rate_,channels_));file.flush();file.close();
+    snd_pcm_drop(pcm);snd_pcm_close(pcm);
+    const auto saved=checkpointWav(file,rate_,channels_,true);
+    finalized_=saved>0;
+    if(saved<0)fail("录音未能安全保存");
 }
 
 bool NativeAudioCapture::appendPcm(QFile&file,const char *data,int bytes){
     const int samples=bytes/2;if(bytes%(channels_*2)||samples>ring_.size())return false;
+    if(file.pos()-44+bytes>MaxWavData){QMutexLocker lock(&mutex_);error_="已达到单个 WAV 文件的容量上限";return false;}
     if(file.write(data,bytes)!=bytes){QMutexLocker lock(&mutex_);error_="录音写入失败";return false;}
+    if(!hasSignal_ && std::any_of(data,data+bytes,[](char value){return value!=0;}))hasSignal_=true;
     {QMutexLocker lock(&mutex_);quint64 first=qMin(quint64(samples),quint64(ring_.size())-write_);std::memcpy(ring_.data()+write_,data,first*2);if(first<quint64(samples))std::memcpy(ring_.data(),data+first*2,(samples-first)*2);write_=(write_+samples)%ring_.size();available_=qMin(quint64(ring_.size()),available_+samples);}
     frames_+=bytes/(channels_*2);sequence_++;return true;
 }
@@ -140,12 +177,16 @@ void NativeAudioCapture::runSerial(){
     if(control.fd<0||audio.fd<0){fail("六麦原始串口不可用或已被占用，请停止其他串口采集程序");return;}
     auto packet=[](int type,const QByteArray&payload,quint16 identity=1){QByteArray out;out.append(char(0xA5));out.append(char(1));out.append(char(type));quint16 size=qToLittleEndian<quint16>(payload.size()),id=qToLittleEndian(identity);out.append(reinterpret_cast<const char*>(&size),2);out.append(reinterpret_cast<const char*>(&id),2);out.append(payload);unsigned sum=0;for(auto c:out)sum+=uchar(c);out.append(char(-sum));return out;};
     auto send=[&](const QByteArray&data){int offset=0;QElapsedTimer timeout;timeout.start();while(offset<data.size()&&timeout.elapsed()<500){auto n=::write(control.fd,data.constData()+offset,data.size()-offset);if(n>0)offset+=n;else{pollfd p{control.fd,POLLOUT,0};poll(&p,1,10);}}return offset==data.size();};
-    QFile file(path_);if(!file.open(QIODevice::WriteOnly|QIODevice::Unbuffered)){fail(file.errorString());return;}file.write(wavHeader(0,rate_,channels_));
+    QFile file(path_);
+    if(!file.open(QIODevice::WriteOnly|QIODevice::NewOnly|QIODevice::Unbuffered)
+        || flock(file.handle(),LOCK_EX|LOCK_NB)!=0 || file.write(wavHeader(0,rate_,channels_))!=44){
+        fail("无法创建六麦原始录音文件");return;
+    }
     {QMutexLocker lock(&mutex_);started_=QDateTime::currentMSecsSinceEpoch()/1000.;}
     auto enable=packet(5,"{\"type\":\"get_original_audio\",\"content\":{\"audio\":1}}");
     send(packet(5,"{\"type\":\"manual_wakeup\",\"content\":{\"beam\":0}}",0));
     if(!send(enable)){fail("六麦原始数据开启命令发送失败");return;}
-    QByteArray controlBytes,audioBytes,payloadTail;QElapsedTimer clock,storage,lastAudio;clock.start();storage.start();lastAudio.start();char block[65536];
+    QByteArray controlBytes,audioBytes,payloadTail;QElapsedTimer storage,lastAudio;storage.start();lastAudio.start();char block[65536];
     auto consume=[&](QByteArray&bytes,bool raw){
         while(bytes.size()>=8){
             auto sync=bytes.indexOf(QByteArray::fromHex("a501"));if(sync<0){bytes=bytes.right(1);break;}if(sync)bytes.remove(0,sync);if(bytes.size()<8)break;
@@ -161,7 +202,7 @@ void NativeAudioCapture::runSerial(){
         }
         if(bytes.size()>256*1024){checksumErrors_++;bytes=bytes.right(7);}
     };
-    while(!isInterruptionRequested()&&clock.elapsed()<300000){
+    while(!isInterruptionRequested()){
         pollfd ports[2]={{control.fd,POLLIN,0},{audio.fd,POLLIN,0}};int ready=poll(ports,2,30);if(ready<0&&errno!=EINTR){fail("六麦串口读取失败");break;}
         for(int i=0;i<2;i++){
             if(ports[i].revents&(POLLERR|POLLHUP|POLLNVAL)){fail("六麦串口已断开");requestInterruption();break;}
@@ -169,10 +210,12 @@ void NativeAudioCapture::runSerial(){
             for(int reads=0;reads<32;reads++){auto n=::read(ports[i].fd,block,sizeof(block));if(n<=0)break;bytes.append(block,n);consume(bytes,i==1);}
         }
         if(lastAudio.elapsed()>4000){fail("未收到有效六通道原始数据，请检查串口连接和模块固件");break;}
-        if(storage.elapsed()>5000){storage.restart();if(QStorageInfo(path_).bytesAvailable()<100*1024*1024){fail("剩余空间不足 100 MB");break;}file.flush();}
+        if(storage.elapsed()>5000){storage.restart();if(QStorageInfo(path_).bytesAvailable()<100*1024*1024){fail("剩余空间不足 100 MB");break;}if(checkpointWav(file,rate_,channels_,false)<0){fail("无法更新录音文件头");break;}}
     }
     send(packet(5,"{\"type\":\"get_original_audio\",\"content\":{\"audio\":0}}",2));
-    auto size=qMax(qint64(0),file.size()-44);file.seek(0);file.write(wavHeader(size,rate_,channels_));file.flush();file.close();
+    const auto saved=checkpointWav(file,rate_,channels_,true);
+    finalized_=saved>0;
+    if(saved<0)fail("录音未能安全保存");
 }
 
 bool NativeSignalAnalyzer::nativeMethod(const QString&m){return QStringList{"time","fft","welch","stft","waterfall","hilbert"}.contains(m);}

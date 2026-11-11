@@ -179,7 +179,7 @@ Rectangle {
     }
 
     function showResult(result, successText) {
-        message = result.ok ? successText : result.error
+        message = result.ok ? (result.warning || successText) : result.error
         return result.ok
     }
     function makeEvent() {

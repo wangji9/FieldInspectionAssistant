@@ -1,4 +1,5 @@
 #include "RecordingCatalog.h"
+#include "NativeSignalPipeline.h"
 #include "../database/DatabaseManager.h"
 #include "../app/SessionManager.h"
 
@@ -30,7 +31,49 @@ RecordingCatalog::RecordingCatalog(DatabaseManager *business,SessionManager *ses
     QSet<QString> columns;QSqlQuery info(db_);info.exec("PRAGMA table_info(recordings)");while(info.next())columns.insert(info.value(1).toString());
     const QList<QPair<QString,QString>> additions={{"name","TEXT NOT NULL DEFAULT ''"},{"notes","TEXT NOT NULL DEFAULT ''"},{"owner_id","TEXT NOT NULL DEFAULT ''"},{"deleted_at","TEXT NOT NULL DEFAULT ''"},{"updated_at","TEXT NOT NULL DEFAULT ''"},{"updated_by","TEXT NOT NULL DEFAULT ''"},{"revision","INTEGER NOT NULL DEFAULT 0"}};
     for(auto field:additions)if(!columns.contains(field.first)&&!execute("ALTER TABLE recordings ADD COLUMN "+field.first+" "+field.second)){db_.rollback();return;}
-    if(!execute("CREATE INDEX IF NOT EXISTS recording_catalog_order ON recordings(deleted_at,started DESC,id)")||!execute("PRAGMA user_version=2")||!db_.commit()){if(error_.isEmpty())error_=db_.lastError().text();db_.rollback();}
+    if(!execute("CREATE INDEX IF NOT EXISTS recording_catalog_order ON recordings(deleted_at,started DESC,id)")||!execute("PRAGMA user_version=2")||!db_.commit()){if(error_.isEmpty())error_=db_.lastError().text();db_.rollback();return;}
+    recoverInterrupted(folder);
+}
+
+void RecordingCatalog::recoverInterrupted(const QString &folder) {
+    const auto canonical=QDir(folder).canonicalPath();
+    if(canonical.isEmpty())
+        return;
+    QSqlQuery pending(db_);
+    if(!pending.exec("SELECT * FROM recordings WHERE origin='sensor' AND complete=0 AND deleted_at=''"))
+        return;
+    QVariantList candidates;
+    while(pending.next())
+        candidates.append(values(pending));
+    pending.finish();
+    for(const auto &candidate:candidates) {
+        const auto record=candidate.toMap();
+        const QFileInfo file(record.value("path").toString());
+        if(file.isSymLink() || file.canonicalPath()!=canonical || file.suffix()!="wav")
+            continue;
+        const int rate=record.value("fs").toInt();
+        const auto frames=recoverCapturedWav(file.filePath(),rate,record.value("channels").toInt());
+        if(frames<=0 || !db_.transaction())
+            continue;
+        const auto id=record.value("id").toString();
+        QSqlQuery update(db_);
+        update.prepare("UPDATE recordings SET complete=1,duration=? WHERE id=? AND complete=0");
+        update.addBindValue(double(frames)/rate);
+        update.addBindValue(id);
+        if(!update.exec() || update.numRowsAffected()!=1 || !event(id,"recover",record,row(id)) || !db_.commit())
+            db_.rollback();
+    }
+}
+
+bool RecordingCatalog::completeCapture(const QVariantMap &record,const QVariantMap &calibration) {
+    if(!ready() || !record.value("finalized").toBool())
+        return false;
+    QSqlQuery update(db_);
+    update.prepare("UPDATE recordings SET complete=1,duration=?,calibration=? WHERE id=?");
+    update.addBindValue(record.value("duration"));
+    update.addBindValue(json(calibration));
+    update.addBindValue(record.value("id"));
+    return update.exec() && update.numRowsAffected()==1;
 }
 RecordingCatalog::~RecordingCatalog(){db_.close();db_=QSqlDatabase();QSqlDatabase::removeDatabase(connection_);}
 bool RecordingCatalog::manager()const{return session_->can("assign");}

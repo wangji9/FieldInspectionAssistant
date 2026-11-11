@@ -16,7 +16,9 @@ public:
     QVariantMap update(const QString &id,const QString &name,const QString &notes,int revision);
     QVariantMap setDeleted(const QString &id,bool deleted,int revision);
     QVariantMap beginCapture(const QVariantMap &record);
+    bool completeCapture(const QVariantMap &record,const QVariantMap &calibration);
 private:
+    void recoverInterrupted(const QString &folder);
     bool manager() const;
     bool writable(const QVariantMap &row) const;
     QVariantMap row(const QString &id) const;

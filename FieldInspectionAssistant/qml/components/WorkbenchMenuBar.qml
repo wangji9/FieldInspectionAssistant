@@ -51,6 +51,7 @@ MenuBar {
         MenuItem { text: "另存为…"; enabled: bar.hasProject; onTriggered: bar.workbench.copyProject(false) }
         MenuItem { text: "关闭工程"; enabled: bar.hasProject; onTriggered: bar.workbench.closeProject() }
         MenuSeparator {}
+        MenuItem { text: "退出登录 / 切换账户"; onTriggered: App.session.logout() }
         MenuItem { text: "退出"; onTriggered: bar.workbench.close() }
     }
     Menu {

@@ -5,10 +5,25 @@
 #include <cstring>
 
 namespace {
-QByteArray saltBytes() { QByteArray bytes(16,0);for(int i=0;i<16;i+=4){auto v=QRandomGenerator::system()->generate();std::memcpy(bytes.data()+i,&v,4);}return bytes; }
+QByteArray randomBytes(int size) {
+    QByteArray bytes(size, Qt::Uninitialized);
+    for (int i=0;i<size;i+=4) {
+        const auto value=QRandomGenerator::system()->generate();
+        std::memcpy(bytes.data()+i,&value,4);
+    }
+    return bytes;
+}
 QByteArray passwordHash(const QString &password,const QByteArray &salt,int iterations=600000) { return QPasswordDigestor::deriveKeyPbkdf2(QCryptographicHash::Sha256,password.toUtf8(),salt,iterations,32); }
 bool sameHash(const QByteArray &a,const QByteArray &b) { if(a.size()!=b.size())return false;unsigned char difference=0;for(int i=0;i<a.size();++i)difference|=static_cast<unsigned char>(a[i]^b[i]);return difference==0; }
 QVariantMap failure(const QString &message){return {{"ok",false},{"error",message}};}
+const auto LocalLoginKey=QStringLiteral("local_login_verifier");
+const auto PrivatePermissions=QFileDevice::ReadOwner|QFileDevice::WriteOwner;
+QString tokenPath(const DatabaseManager *db) {
+    return QFileInfo(db->databasePath()).absoluteDir().filePath("maintenance/local-session");
+}
+QByteArray verifier(const QString &id,const QByteArray &token,const QByteArray &passwordHash) {
+    return QCryptographicHash::hash(id.toUtf8()+token+passwordHash,QCryptographicHash::Sha256).toHex();
+}
 }
 
 SessionManager::SessionManager(DatabaseManager *db, QObject *parent)
@@ -40,7 +55,64 @@ bool SessionManager::login(const QString &name) {
 bool SessionManager::setupRequired() const {
     QSqlQuery query(db_->connection());return query.exec("SELECT COUNT(*) FROM users WHERE role='admin' AND active=1 AND password_hash<>''")&&query.next()&&query.value(0).toInt()==0;
 }
-bool SessionManager::authenticate(const QString &name,const QString &password) {
+void SessionManager::activate(const QString &id,const QString &name,const QString &role,const QString &auditAction) {
+    userId_=id;
+    userName_=name;
+    role_=role;
+    failures_=0;
+    retryAfter_={};
+    message_.clear();
+    db_->setActor(id,name);
+    db_->appendAudit(auditAction,"user",id,name);
+    emit sessionChanged();
+}
+
+void SessionManager::forgetLocalLogin() {
+    db_->setState(LocalLoginKey,QStringLiteral(""));
+    QFile::remove(tokenPath(db_));
+}
+
+bool SessionManager::rememberLocalLogin(const QString &id,const QByteArray &hash) {
+    forgetLocalLogin();
+    const QString path=tokenPath(db_);
+    if (!QDir().mkpath(QFileInfo(path).absolutePath()))
+        return false;
+    const auto token=randomBytes(32).toHex();
+    QSaveFile file(path);
+    const auto content=id.toUtf8()+'\n'+token;
+    if (!file.open(QIODevice::WriteOnly) || !file.setPermissions(PrivatePermissions)
+        || file.write(content)!=content.size() || !file.commit())
+        return false;
+    if (db_->setState(LocalLoginKey,QString::fromLatin1(verifier(id,token,hash))))
+        return true;
+    QFile::remove(path);
+    return false;
+}
+
+void SessionManager::restoreLocalLogin() {
+    QFile file(tokenPath(db_));
+    const QFileInfo info(file);
+    if (!info.isFile() || info.isSymLink() || info.size()>128
+        || (info.permissions() & (QFileDevice::ReadGroup|QFileDevice::WriteGroup|QFileDevice::ReadOther|QFileDevice::WriteOther))
+        || !file.open(QIODevice::ReadOnly))
+        return;
+    const auto parts=file.readAll().split('\n');
+    file.close();
+    if (parts.size()==2 && parts[1].size()==64) {
+        const auto id=QString::fromUtf8(parts[0]);
+        QSqlQuery query(db_->connection());
+        query.prepare("SELECT name,role,password_hash FROM users WHERE id=? AND active=1 AND password_hash<>''");
+        query.addBindValue(id);
+        if (query.exec() && query.next() &&
+            sameHash(verifier(id,parts[1],query.value(2).toByteArray()),db_->state(LocalLoginKey).toLatin1())) {
+            activate(id,query.value(0).toString(),query.value(1).toString(),"resume_login");
+            return;
+        }
+    }
+    forgetLocalLogin();
+}
+
+bool SessionManager::authenticate(const QString &name,const QString &password,bool remember) {
     if(QDateTime::currentDateTimeUtc()<retryAfter_){message_=QStringLiteral("尝试过于频繁，请稍后再试");emit sessionChanged();return false;}
     QSqlQuery query(db_->connection());query.prepare("SELECT id,name,role,active,password_hash,password_salt,password_iterations FROM users WHERE name=? AND password_hash<>''");query.addBindValue(name.trimmed());
     bool exists=query.exec()&&query.next();
@@ -49,15 +121,26 @@ bool SessionManager::authenticate(const QString &name,const QString &password) {
     const auto hash=passwordHash(password.left(256),salt,iterations);
     bool ok=exists&&query.value(3).toBool()&&!query.value(4).toString().isEmpty()&&sameHash(hash.toHex(),query.value(4).toByteArray());
     if(!ok){++failures_;if(failures_>=5)retryAfter_=QDateTime::currentDateTimeUtc().addSecs(qMin(60,failures_*3));message_=QStringLiteral("用户名或密码错误，或账户未启用");emit sessionChanged();return false;}
-    if(loggedIn()&&userId_!=query.value(0).toString())logout();
-    userId_=query.value(0).toString();userName_=query.value(1).toString();role_=query.value(2).toString();failures_=0;message_.clear();
-    db_->setActor(userId_,userName_);db_->appendAudit("login","user",userId_,userName_);emit sessionChanged();return true;
+    const auto id=query.value(0).toString();
+    const auto username=query.value(1).toString();
+    const auto role=query.value(2).toString();
+    const auto credential=query.value(4).toByteArray();
+    query.finish();
+    if(loggedIn()&&userId_!=id)logout();
+    if (remember) {
+        if (!rememberLocalLogin(id,credential))
+            qWarning("Could not save the local login");
+    } else {
+        forgetLocalLogin();
+    }
+    activate(id,username,role,"login");
+    return true;
 }
-bool SessionManager::setupAdministrator(const QString &name,const QString &password){
+bool SessionManager::setupAdministrator(const QString &name,const QString &password,bool remember){
     if(!setupRequired()){message_=QStringLiteral("管理员已设置，请登录");emit sessionChanged();return false;}
     auto r=saveUser(QString(),name,QStringLiteral("admin"),true,password);
     if(!r.value("ok").toBool()){message_=r.value("error").toString();emit sessionChanged();return false;}
-    return authenticate(name,password);
+    return authenticate(name,password,remember);
 }
 QVariantMap SessionManager::saveUser(const QString &id,const QString &name,const QString &role,bool active,const QString &password){
     const auto username=name.trimmed();const bool setup=setupRequired()&&id.isEmpty()&&role=="admin"&&active;
@@ -86,7 +169,7 @@ QVariantMap SessionManager::saveUser(const QString &id,const QString &name,const
     }
     if(!query.exec())return reject(query.lastError().text());
     if(!password.isEmpty()){
-        auto salt=saltBytes();query.prepare("UPDATE users SET password_hash=?,password_salt=?,password_iterations=600000 WHERE id=?");
+        auto salt=randomBytes(16);query.prepare("UPDATE users SET password_hash=?,password_salt=?,password_iterations=600000 WHERE id=?");
         query.addBindValue(passwordHash(password,salt).toHex());query.addBindValue(salt.toHex());query.addBindValue(identity);
         if(!query.exec())return reject(query.lastError().text());
     }
@@ -118,6 +201,7 @@ QVariantMap SessionManager::removeUser(const QString &id){
 
 void SessionManager::logout() {
     if(loggedIn())emit sessionEnding();
+    forgetLocalLogin();
     userId_.clear();
     userName_.clear();
     role_.clear();

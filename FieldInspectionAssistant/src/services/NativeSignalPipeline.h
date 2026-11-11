@@ -22,6 +22,8 @@ private:
     mutable QMutex mutex_;QVector<qint16> ring_;quint64 write_=0,available_=0;
     std::atomic<quint64>sequence_{0},frames_{0},xruns_{0};double started_=0;
     std::atomic<quint64>packets_{0},checksumErrors_{0};
+    std::atomic_bool hasSignal_{false};
+    std::atomic_bool finalized_{false};
 };
 
 class NativeSignalAnalyzer final:public QThread{
@@ -40,3 +42,4 @@ private:
 
 QVariantMap nativeSignalPlot(const QVector<double>&samples,int fs,const QString &method,const QString &unit,bool includeMetrics=true);
 bool writePcmWav(const QString &path,const QByteArray &pcm,int fs,int channels);
+qint64 recoverCapturedWav(const QString &path,int rate,int channels);

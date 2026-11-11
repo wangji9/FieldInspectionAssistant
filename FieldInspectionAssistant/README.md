@@ -88,6 +88,8 @@ python3 deploy/install_desktop_launcher.py
 
 更新时在已有的 `field-inspection-source` 执行 `git pull --ff-only`，再复制应用目录并运行安装脚本。安装会编译 Qt 应用和原生推理程序，安装声学与朗读依赖，部署并重启推理服务。请在维护时段更新已运行的设备。首次启动空数据库时，在登录页创建管理员。
 
+登录时可选「在本机保持登录」。凭据仅保存在当前板端用户数据目录，退出登录或切换账号时清除。共用系统账户的场合可在登录时取消勾选。推理服务使用系统默认调频策略，运行推理无需 sudo。
+
 安装后可双击桌面的「现场巡检助手」，也可在 `ztl` 的桌面终端执行以下命令。最后一条会打开程序或切换到已打开的窗口。
 
 ```bash
@@ -174,6 +176,8 @@ ls -ld "$APP_DATA"
 
 迁移工程时使用应用的工程归档功能，并保留完整的 `.miproj` 目录。备份业务主库和证据时使用应用的备份功能，生成一致的数据库快照。PDF、CSV 等手动导出的文件保存到导出时选择的位置。
 
+只导入工程包时，软件会提示目标业务库中缺少的设备、巡检记录或缺陷。完整板端移交使用原板的业务备份 ZIP，外置工程目录另行归档。恢复后核对工程总览中的巡检和缺陷关联。当前支持离线交接，在线同步需部署对应服务。
+
 ## 六麦与串口
 
 六麦模块的 UAC 与 UART 两根 USB 线均接到主板。规则将 `2208:0001` 绑定为 `/dev/lg_speech_uac`，将接在指定 USB 位置的 CH340（`1a86:7523`）绑定为 `/dev/lg_speech_serial`。当前规则使用 USB `devpath=1.1`。换 USB 位置后，用 `udevadm info --attribute-walk` 核对拓扑并更新 [规则](deploy/udev/xf-speech.rules)。
@@ -202,6 +206,7 @@ cmake --build build-test --target voice_input_test --parallel 4
 ctest --test-dir build-test --output-on-failure
 PYTHONPATH="$PWD/services/inference:$PWD/services/audio" \
   python3 -m unittest discover -s tests/inference -v
+python3 tests/site_acceptance.py build/field_inspection_assistant
 ```
 
 ### 服务与模型验证

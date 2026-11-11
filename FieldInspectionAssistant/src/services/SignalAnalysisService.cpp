@@ -70,7 +70,11 @@ void SignalAnalysisService::publishNative(){
     if(measurementClock_.elapsed()>=1000){
         measurementClock_.restart();auto info=capture_->info();
         send({{"op","native_metrics"},{"record",QJsonObject::fromVariantMap(info)},{"channel",channel_},{"time",value.value("time").toDouble()},{"metrics",QJsonObject::fromVariantMap(value.value("plot").toMap().value("metrics").toMap())},{"channel_metrics",QJsonArray::fromVariantList(value.value("channel_metrics").toList())}});
-        message_=value.value("transport").toString()=="six_serial"?QStringLiteral("C++ 六通道实采 · 16000 Hz · 校验错误 %1").arg(value.value("checksum_errors").toULongLong()):QStringLiteral("C++ 实采 · %1 Hz · 处理 %2 ms · XRUN %3").arg(value.value("rate").toInt()).arg(value.value("processing_ms").toDouble(),0,'f',1).arg(value.value("xruns").toULongLong());emit changed();
+        if(info.value("duration").toDouble()>=3 && !info.value("has_signal").toBool())
+            message_=QStringLiteral("已接收采样，但信号全为零。请检查采集源并对麦克风说话。");
+        else
+            message_=value.value("transport").toString()=="six_serial"?QStringLiteral("C++ 六通道实采 · 16000 Hz · 校验错误 %1").arg(value.value("checksum_errors").toULongLong()):QStringLiteral("C++ 实采 · %1 Hz · 处理 %2 ms · XRUN %3").arg(value.value("rate").toInt()).arg(value.value("processing_ms").toDouble(),0,'f',1).arg(value.value("xruns").toULongLong());
+        emit changed();
     }
     emit snapshotChanged();deliveryMs_=delivery.nsecsElapsed()/1e6;
 }
@@ -78,10 +82,17 @@ void SignalAnalysisService::finishNative(){
     frameTimer_.stop();publishNative();auto info=capture_->info();
     retainedInfo_=info;retainedPcm_=capture_->latestPcm(6);retainedRate_=capture_->rate();retainedChannels_=capture_->channels();
     if(analyzer_){delete analyzer_;analyzer_=nullptr;}
-    send({{"op","native_finished"},{"record",QJsonObject::fromVariantMap(info)},{"method",method_},{"channel",channel_},{"options",QJsonObject::fromVariantMap(options_)}});
+    const bool indexed=catalog_->completeCapture(info,options_);
+    if(worker_.state()==QProcess::Running)
+        send({{"op","native_finished"},{"record",QJsonObject::fromVariantMap(info)},{"method",method_},{"channel",channel_},{"options",QJsonObject::fromVariantMap(options_)}});
     capture_->deleteLater();capture_=nullptr;running_=false;
-    message_=info.value("error").toString().isEmpty()?QStringLiteral("C++ 采集已保存，原始数据完整保留"):info.value("error").toString();
-    if (info.value("frames").toULongLong() > 0 && info.value("error").toString().isEmpty())
+    message_=info.value("error").toString();
+    if(message_.isEmpty())
+        message_=!indexed ? QStringLiteral("录音没有有效帧，或索引未能保存")
+            : !info.value("has_signal").toBool() ? QStringLiteral("已保存 WAV，采样值全部为零")
+            : QStringLiteral("录音已保存");
+    reloadRecordings();
+    if (indexed && info.value("has_signal").toBool() && info.value("error").toString().isEmpty())
         emit saved(info.value("path").toString());
     emit changed();
 }

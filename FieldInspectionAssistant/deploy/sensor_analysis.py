@@ -269,11 +269,11 @@ class Worker:
                                (record['id'],row['channel'],p['time'],json.dumps(row['metrics'],allow_nan=False)))
                 else:
                     db.execute('UPDATE recordings SET duration=?,complete=?,calibration=? WHERE id=?',
-                               (record['duration'],int(record.get('frames',0)>0),json.dumps(p.get('options',{})),record['id']))
+                               (record['duration'],int(record.get('finalized',record.get('frames',0)>0)),json.dumps(p.get('options',{})),record['id']))
             self.selected=''
             if op=='native_finished':
                 self.method=p.get('method',self.method);self.channel=p.get('channel',0);self.options=p.get('options',{})
-                if record.get('frames',0)>0:self.load(record['path'],record['id'])
+                if record.get('finalized',record.get('frames',0)>0):self.load(record['path'],record['id'])
                 self.records()
             self.trends()
             return

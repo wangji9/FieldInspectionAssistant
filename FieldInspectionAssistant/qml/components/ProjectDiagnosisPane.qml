@@ -28,6 +28,11 @@ Flickable {
                 onClicked: pane.projectPage.inference.analyze(pane.projectPage.eventId)
             }
             TouchButton {
+                text: "取消排队"; autoWidth: true; height: 29
+                visible: pane.projectPage.inference.queued
+                onClicked: pane.projectPage.inference.cancelQueued()
+            }
+            TouchButton {
                 text: "查看基准资料"; autoWidth: true; height: 29
                 enabled: !!pane.projectPage.activeEvent.anchor_id
                 onClicked: pane.projectPage.openEvidence(pane.projectPage.activeEvent.anchor_id)
@@ -71,7 +76,7 @@ Flickable {
 
         Label {
             width: layout.width
-            text: pane.projectPage.hasDiagnosis ? "诊断结果" : "诊断依据"
+            text: pane.projectPage.hasDiagnosis ? "AI 诊断建议" : "诊断依据"
             font.bold: true
         }
 

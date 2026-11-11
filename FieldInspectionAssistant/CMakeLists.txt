@@ -56,6 +56,7 @@ qt_add_executable(field_inspection_assistant
     src/services/AccessPolicy.h src/services/AccessPolicy.cpp
     src/services/WorkspaceService.h src/services/WorkspaceService.cpp
     src/services/ProjectWorkspace.h src/services/ProjectWorkspace.cpp
+    src/services/ProjectEvidenceMetrics.h src/services/ProjectEvidenceMetrics.cpp
     src/services/ProjectInference.h src/services/ProjectInference.cpp
     src/services/HardwareStatusService.h src/services/HardwareStatusService.cpp
     src/services/InspectionWorkflowService.h src/services/InspectionWorkflowService.cpp

@@ -78,7 +78,7 @@ replace_runtime_file() {
     return 1
   fi
 }
-for module in answer_policy asr_stream perf_profile resident_models server speech_audio speech_endpoint speech_session; do
+for module in answer_policy asr_stream resident_models server speech_audio speech_endpoint speech_session; do
   replace_runtime_file "$inference/$module.py" "$runtime/$module.py" 0644
 done
 replace_runtime_file "$project/services/audio/six_mic_control.py" "$runtime/six_mic_control.py" 0644

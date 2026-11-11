@@ -79,6 +79,9 @@ private:
                                  bool archive) const;
     QString reportText(const QString &reportId) const;
     bool ready() const;
+    bool canReadLinkedRecord(const QString &recordId) const;
+    bool canReadEvent(const QString &eventId) const;
+    QVariantMap transferStatus() const;
     QVariantList rows(const QString &sql, const QVariantList &args = {}) const;
     void log(const QString &action, const QString &detail);
     void rememberProject();

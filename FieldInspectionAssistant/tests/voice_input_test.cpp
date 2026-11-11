@@ -1,4 +1,5 @@
 #include "../src/services/NativeVoiceInput.h"
+#include "../src/services/NativeSignalPipeline.h"
 #include <QtEndian>
 #include <stdexcept>
 static void check(bool ok,const char *what){if(!ok)throw std::runtime_error(what);}
@@ -9,6 +10,16 @@ int main(int argc,char **argv){QCoreApplication app(argc,argv);try{
  buffer=QByteArray::fromHex("a50104ffff0000")+packet;frames=takeVoiceFrames(buffer);check(frames.size()==1,"oversized frame guard");
  VoiceEndpoint endpoint;QByteArray silence(640,0);for(int i=0;i<500;++i)check(!endpoint.feed(silence)&&!endpoint.spoken(),"silence became speech");
  endpoint.reset();QByteArray impulse(640,0);qToLittleEndian<qint16>(15000,reinterpret_cast<uchar*>(impulse.data()+8));endpoint.feed(impulse);for(int i=0;i<80;++i)endpoint.feed(silence);check(!endpoint.spoken(),"single impulse became sustained speech");
+ QTemporaryDir folder;check(folder.isValid(),"temporary recording directory");
+ const auto interrupted=folder.filePath("interrupted.wav");
+ check(writePcmWav(interrupted,QByteArray(),16000,6),"initial WAV header");
+ QFile raw(interrupted);check(raw.open(QIODevice::WriteOnly|QIODevice::Append),"append interrupted PCM");
+ const QByteArray pcmFixture(25,'\x12');check(raw.write(pcmFixture)==pcmFixture.size(),"write interrupted PCM");raw.close();
+ check(recoverCapturedWav(interrupted,16000,6)==2,"recover complete six-channel frames");
+ check(raw.open(QIODevice::ReadOnly),"read recovered WAV");const auto recovered=raw.readAll();raw.close();
+ check(recovered.size()==68&&qFromLittleEndian<quint32>(recovered.constData()+40)==24
+       &&recovered.mid(44)==pcmFixture.left(24),"repair header and preserve complete samples");
+ check(recoverCapturedWav(interrupted,16000,1)<0,"reject a mismatched recording format");
  if(argc>1){QFile f(argv[1]);check(f.open(QIODevice::ReadOnly),"fixture open");auto wav=f.readAll();check(wav.startsWith("RIFF")&&wav.mid(8,4)=="WAVE","fixture WAV");int pos=12;QByteArray pcm;while(pos+8<=wav.size()){int size=qFromLittleEndian<quint32>(reinterpret_cast<const uchar*>(wav.constData()+pos+4));if(wav.mid(pos,4)=="data"){pcm=wav.mid(pos+8,size);break;}pos+=8+size+(size&1);}check(!pcm.isEmpty(),"fixture PCM");endpoint.reset();bool ended=false;for(int i=0;i<pcm.size();i+=640){ended=endpoint.feed(pcm.mid(i,640));if(ended)break;}for(int i=0;!ended&&i<100;++i)ended=endpoint.feed(silence);check(endpoint.spoken()&&ended&&endpoint.audio().size()>6400,"spoken fixture endpoint");qInfo()<<"SPEECH_ENDPOINT"<<endpoint.durationMs()<<endpoint.audio().size();}
  qInfo()<<"VOICE_INPUT_CHECKS_OK";return 0;
  }catch(const std::exception&e){qCritical()<<e.what();return 1;}}

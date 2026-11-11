@@ -20,6 +20,7 @@ class ProjectInference final : public QObject
     Q_PROPERTY(QString subjectKind READ subjectKind NOTIFY changed)
     Q_PROPERTY(bool ready READ ready NOTIFY changed)
     Q_PROPERTY(bool busy READ busy NOTIFY changed)
+    Q_PROPERTY(bool queued READ queued NOTIFY changed)
 public:
     ProjectInference(ProjectWorkspace *workspace, SessionManager *session, InspectionWorkflowService *workflow,
                      WorkspaceService *records, QObject *parent);
@@ -30,7 +31,9 @@ public:
     QString subjectKind() const { return kind_; }
     bool ready() const { return ready_; }
     bool busy() const { return busy_; }
+    bool queued() const { return queued_; }
     Q_INVOKABLE void refresh();
+    Q_INVOKABLE void cancelQueued();
     Q_INVOKABLE void analyze(const QString &eventId);
     Q_INVOKABLE void analyzeSubject(const QString &kind, const QString &id);
 
@@ -53,5 +56,5 @@ private:
     QByteArray request_, buffer_;
     QString operation_, job_, project_, event_, subject_, kind_, answer_;
     QString status_ = tr("尚未检查推理服务");
-    bool ready_ = false, busy_ = false;
+    bool ready_ = false, busy_ = false, queued_ = false;
 };

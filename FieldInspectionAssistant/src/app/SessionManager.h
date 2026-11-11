@@ -27,8 +27,9 @@ public:
 
     Q_INVOKABLE QVariantList users() const;
     Q_INVOKABLE bool login(const QString &name);
-    Q_INVOKABLE bool authenticate(const QString &name,const QString &password);
-    Q_INVOKABLE bool setupAdministrator(const QString &name,const QString &password);
+    Q_INVOKABLE bool authenticate(const QString &name,const QString &password,bool remember=true);
+    Q_INVOKABLE bool setupAdministrator(const QString &name,const QString &password,bool remember=true);
+    void restoreLocalLogin();
     Q_INVOKABLE QVariantMap saveUser(const QString &id,const QString &name,const QString &role,bool active,const QString &password);
     Q_INVOKABLE QVariantMap removeUser(const QString &id);
     Q_INVOKABLE void logout();
@@ -42,6 +43,9 @@ signals:
     void usersChanged();
 
 private:
+    void activate(const QString &id,const QString &name,const QString &role,const QString &auditAction);
+    bool rememberLocalLogin(const QString &id,const QByteArray &passwordHash);
+    void forgetLocalLogin();
     DatabaseManager *db_ = nullptr;
     QString userId_;
     QString userName_;
