@@ -16,8 +16,8 @@ def audit(binary, root, steps, name):
     run_dir.mkdir()
     script = run_dir / "steps.json"
     script.write_text(json.dumps([
-        {"name": key, "expression": expression, "delay": 150}
-        for key, expression in steps
+        {"name": key, "expression": expression, "delay": 150, **(options[0] if options else {})}
+        for key, expression, *options in steps
     ], ensure_ascii=False), encoding="utf-8")
     env = os.environ.copy()
     env.pop("FIELDOPS_PAGE", None)
@@ -64,6 +64,20 @@ def main():
             ("import-notes", f'App.projects.importEvidence({json.dumps(notes.as_uri())},{asset},"轴承","text",{date}).ok'),
             ("fuse", 'App.projects.fuse(App.projects.evidence[0].id).ok'),
             ("diagnostic-input", 'App.projects.analysisInput(App.projects.events[0].id).summary.includes("temperature_matrix")'),
+            ("overview", 'auditWindow.section === "projects" && auditWindow.pageIndex() >= 0'),
+            ("combined-diagnosis", 'App.nav.push("fusion",{event_id:App.projects.events[0].id}); '
+             'App.nav.page === "projectDiagnosis" && auditWindow.section === "diagnostics" && '
+             'App.nav.param("event_id") === App.projects.events[0].id'),
+            ("graph-belongs-to-evidence", 'App.nav.push("projectGraph"); '
+             'auditWindow.section === "projects" && auditWindow.subsection === "projectEvidence"'),
+            ("one-audio-workspace", 'App.nav.push("analysis",{analysis_tab:1}); '
+             'auditWindow.section === "projects" && auditWindow.subsection === "analysis"'),
+            ("open-manual-event", "true", {"tapObject": "registerAnalysisEvent"}),
+            ("cancel-manual-event-in-place", 'App.nav.page === "analysis"', {"tapObject": "manualEventCancel"}),
+            ("report-center", 'auditWindow.navigate("reports"); '
+             'auditWindow.section === "reports" && auditWindow.subsection === "formalReports"'),
+            ("event-report", 'auditWindow.navigateSubsection("reports"); '
+             'auditWindow.section === "reports" && auditWindow.subsection === "reports"'),
             ("unconfirmed-ai", 'App.projects.saveFinding(App.projects.project.id,App.projects.events[0].id,'
              '"判定: NORMAL\\n验收建议","fixture").ok && App.projects.events[0].classification === "unknown"'),
         ], "create")

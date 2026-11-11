@@ -82,7 +82,7 @@ Rectangle {
             DesktopTab { text: "图像显示" }
             DesktopTab { text: "温度显示"; onClicked: page.showReference = false }
             DesktopTab { text: "设备配置"; onClicked: { page.scan(); App.hardware.refresh() } }
-            DesktopTab { text: "软件配置"; onClicked: page.draft = capture.options }
+            DesktopTab { text: "软件配置"; onClicked: page.showSoftwareSetup() }
         }
         StackLayout {
             Layout.fillWidth: true

@@ -48,8 +48,7 @@ Flickable {
                 onClicked: pane.projectPage.inference.refresh()
             }
             TouchButton {
-                visible: !pane.projectPage.activeEvent.id
-                text: "打开工程资料"; autoWidth: true; height: 29
+                text: "选择工程资料"; autoWidth: true; height: 29
                 onClicked: pane.projectPage.showEvidence("")
             }
         }
@@ -67,7 +66,7 @@ Flickable {
             height: 32 + rowHeight * Math.max(2, Math.min(5, items.length))
             spreadsheet: true
             items: pane.projectPage.visibleEvents
-            emptyText: "暂无诊断对象，请先从工程资料生成融合事件"
+            emptyText: "暂无诊断对象。请在工程资料中选择证据并生成融合诊断。"
             selectedIndex: items.findIndex(row => row.id === pane.projectPage.eventId)
             columns: [{key:"title", title:"诊断对象", width:0}, {key:"device", title:"设备", width:95},
                       {key:"point", title:"测点", width:80}, {key:"classificationLabel", title:"判定", width:58}]

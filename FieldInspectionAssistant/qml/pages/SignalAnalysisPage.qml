@@ -108,12 +108,6 @@ Rectangle {
         if (page !== undefined && page !== null) root.tab = Number(page)
         if (App.nav.param("open_capture_settings")) Qt.callLater(root.openSettings)
     }
-    function selectWorkspaceTab(index) {
-        const capturing = !!App.nav.param("capture")
-        if ((index === 0) !== capturing)
-            App.nav.push("analysis", {analysis_tab:index, capture:index === 0})
-        else root.tab = index
-    }
     onVisibleChanged:if(visible&&App.session.loggedIn){root.tab=0;root.settingsOpen=false;App.analysis.refresh();root.showRequestedAnalysis()}
     Connections { target: App.nav; function onPageChanged() { if (root.visible && App.nav.page === "analysis") root.showRequestedAnalysis() } }
     // Settings change the existing pipeline; opening settings never restarts acquisition.
@@ -158,12 +152,12 @@ Rectangle {
             objectName:"analysisMainNavigation";Layout.fillWidth:true;Layout.preferredHeight:36
         Flickable {anchors.left:parent.left;anchors.right:parent.right;anchors.rightMargin:68;height:36;contentWidth:navigationRow.width;clip:true;boundsBehavior:Flickable.StopAtBounds
             Row {id:navigationRow;height:36;spacing:4
-                Repeater {model:["采集通道","数据分析","趋势分析","评价分析","数据管理"]
-                    TouchButton{objectName:"analysisTab"+index;text:modelData;autoWidth:true;height:28;variant:root.tab===index?"tonal":"secondary";onClicked:root.selectWorkspaceTab(index)}
+                Repeater {model:["采集通道","信号分析","趋势","声学评估","录音管理"]
+                    TouchButton{objectName:"analysisTab"+index;text:modelData;autoWidth:true;height:28;variant:root.tab===index?"tonal":"secondary";onClicked:root.tab=index}
                 }
                 TouchButton{objectName:"startSensorCapture";text:App.analysis.running?"停止并保存":"开始采集";autoWidth:true;height:28;variant:App.analysis.running?"danger":"primary";enabled:App.analysis.running||(!App.evaluation.busy&&root.selectedSource.length>0);onClicked:root.toggleCapture()}
                 TouchButton { text:"录音归入工程"; autoWidth:true; height:32
-                    visible: !!App.nav.param("capture")
+                    visible: root.tab === 0
                     enabled: !!root.latestProjectRecording && !!App.projects.project.id && !App.analysis.running && !App.speech.recording
                     onClicked: root.projectCapture(root.latestProjectRecording, "audio") }
                 TouchButton{objectName:"selectAnalysisCharts";text:root.chartSelection?"完成选图":"选择图表";autoWidth:true;height:32;visible:root.tab<3;variant:root.chartSelection?"tonal":"ghost";onClicked:{root.chartSelection=!root.chartSelection;if(!root.chartSelection&&root.selectedCharts.length)chartPicker.open()}}

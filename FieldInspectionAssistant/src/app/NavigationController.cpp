@@ -5,6 +5,7 @@ NavigationController::NavigationController(QObject *parent) : QObject(parent) {}
 void NavigationController::push(const QString &page, const QVariantMap &params) {
     const QMap<QString,QString> merged{{"tasks","tasks"},{"devices","device"},{"defects","defects"},{"history","records"}};
     if(merged.contains(page)){auto next=params;next["view"]=merged.value(page);push("operations",next);return;}
+    if (page == "fusion") { push("projectDiagnosis", params); return; }
     if(page=="users"){auto next=params;next["section"]="users";push("settings",next);return;}
     if (page_ == page && params_.isEmpty() && params.isEmpty()) return;
     page_ = page;

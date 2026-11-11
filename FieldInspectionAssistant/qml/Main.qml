@@ -19,7 +19,7 @@ Window {
     color: Colors.background
     property alias inputAssistant: inputAssistantPanel
     property bool showResources: true
-    property bool showInspector: true
+    property bool showInspector: false
     property var editTarget: null
     property string commandNotice: ""
     readonly property var thermal: pageThermal.source
@@ -42,24 +42,23 @@ Window {
     ]
     readonly property var sections: [
         {id: "projects", title: "工程与采集"},
-        {id: "tasks", title: "巡检管理"},
-        {id: "fusion", title: "智能分析"},
-        {id: "ai", title: "大模型诊断"},
-        {id: "events", title: "事件管理"},
-        {id: "reports", title: "巡检报告"}
+        {id: "tasks", title: "巡检执行"},
+        {id: "diagnostics", title: "分析与诊断"},
+        {id: "events", title: "事件与整改"},
+        {id: "reports", title: "报告归档"}
     ]
     readonly property var subsections: ({
-        projects: [{id:"projects", title:"工程总览"}, {id:"devices", title:"设备管理"},
-                   {id:"camera", title:"视频与图像"}, {id:"audioCapture", title:"声音采集"},
-                   {id:"thermal", title:"热成像采集"}, {id:"projectEvidence", title:"资料与文字"},
-                   {id:"projectGraph", title:"多模态图谱"}],
-        fusion: [{id:"fusion", title:"多模态融合"}, {id:"visionAlgorithms", title:"视觉算法"},
-                 {id:"analysis", title:"声音与信号"}, {id:"thermalReview", title:"热像分析"}],
-        ai: [{id:"projectDiagnosis", title:"工程诊断"}, {id:"ai", title:"大模型与助手"}],
-        events: [{id:"events", title:"分析事件"}, {id:"defects", title:"缺陷与整改"}],
+        projects: [{id:"projects", title:"工程总览"}, {id:"devices", title:"设备台账"},
+                   {id:"camera", title:"视频与图像"}, {id:"analysis", title:"声音与信号"},
+                   {id:"thermal", title:"热像采集与分析"}, {id:"projectEvidence", title:"工程资料"}],
         tasks: [{id:"tasks", title:"巡检任务"}, {id:"history", title:"巡检记录"}],
-        reports: [{id:"reports", title:"工程报告"}, {id:"formalReports", title:"正式巡检报告"}]
+        diagnostics: [{id:"projectDiagnosis", title:"融合诊断"}, {id:"visionAlgorithms", title:"视觉分析"},
+                      {id:"ai", title:"AI 助手"}],
+        events: [{id:"events", title:"事件台账"}, {id:"defects", title:"缺陷整改"}],
+        reports: [{id:"formalReports", title:"正式巡检报告"}, {id:"reports", title:"事件分析报告"}]
     })
+    readonly property bool canRegisterEvent: section === "diagnostics" || subsection === "events"
+        || subsection === "analysis" || subsection === "thermal"
     Binding { target: Dimensions; property: "windowWidth"; value: rootWindow.width }
     Binding { target: Dimensions; property: "windowHeight"; value: rootWindow.height }
     onClosing: {
@@ -77,6 +76,7 @@ Window {
     Connections {
         target: App.nav
         function onPageChanged() {
+            if (!rootWindow.thermalPage) properties.currentIndex = 0
             if (App.nav.page === "legacyThermal") pageThermal.close()
             else if (App.nav.page === "thermal") pageLegacy.close()
         }
@@ -96,32 +96,32 @@ Window {
         if (page === "operations")
             return ({device:"devices", defects:"defects", tasks:"tasks", records:"history"})[pageDevices.view] || "history"
         if (page === "dashboard" || page === "overview") return "projects"
-        if (page === "analysis" && App.nav.param("capture")) return "audioCapture"
-        if (page === "thermal" && App.nav.param("review")) return "thermalReview"
+        if (page === "projectGraph") return "projectEvidence"
         if (page === "ai" && pageAi.mode === "algorithms") return "visionAlgorithms"
         if (page === "product" && App.nav.param("section") === "reports") return "formalReports"
         if (page === "inspection") return "tasks"
         return page
     }
     function navigate(page) {
-        if (page === "ai") App.nav.push("projectDiagnosis")
+        if (page === "diagnostics") navigateSubsection("projectDiagnosis")
+        else if (page === "reports") navigateSubsection("formalReports")
         else navigateSubsection(page)
     }
     function navigateSubsection(page) {
         if (page === "ai") App.nav.push("ai", {mode:"agent"})
         else if (page === "visionAlgorithms") App.nav.push("ai", {mode:"algorithms"})
-        else if (page === "audioCapture") App.nav.push("analysis", {analysis_tab:0, capture:true})
-        else if (page === "analysis") App.nav.push("analysis", {analysis_tab:1})
-        else if (page === "thermalReview") thermalSetup("image", true)
+        else if (page === "analysis") App.nav.push("analysis", {analysis_tab:0})
         else if (page === "formalReports") App.nav.push("product", {section:"reports"})
         else App.nav.push(page)
     }
     function pageIndex() {
-        const map = {overview: 0, tasks: 1, inspection: 2, camera: 3,
-                     operations: 4, devices: 4, events: 13, defects: 5, history: 6, settings: 7,
-                     ai: 8, analysis: 9, users: 10, product: 11, thermal: 12,
-                     dashboard: 13, projects: 13, projectEvidence: 13, fusion: 13, reports: 13, legacyThermal: 14}
-        return map[App.nav.page] ?? 13
+        const pages = {
+            operations: pageDevices, inspection: pageInspection, camera: pageCamera,
+            settings: pageSettings, ai: pageAi, analysis: pageSignals,
+            product: pageProduct, thermal: pageThermal, legacyThermal: pageLegacy
+        }
+        const target = pages[App.nav.page] || pageProject
+        return target.StackLayout.index
     }
     function value(key) {
         const reading = thermal.stats[key]
@@ -167,16 +167,15 @@ Window {
     function find() { findDialog.open() }
     function restoreLayout() {
         showResources = true
-        showInspector = true
+        showInspector = false
         resourcePane.SplitView.preferredWidth = Qt.binding(function() { return rootWindow.width >= 1250 ? 190 : 132 })
         inspectorPane.SplitView.preferredWidth = Qt.binding(function() { return rootWindow.width >= 1250 ? 200 : 150 })
         commandNotice = "已恢复默认布局"
     }
     function showOutput() { logDialog.open() }
-    function thermalSetup(kind, review) {
-        App.nav.push("thermal", review ? {review:true} : {})
-        if (kind === "software") pageThermal.showSoftwareSetup()
-        else if (kind === "image") pageThermal.showImage()
+    function thermalSetup(kind) {
+        App.nav.push("thermal")
+        if (kind === "image") pageThermal.showImage()
         else pageThermal.showDeviceSetup(kind === "test")
     }
     function startCapture() {
@@ -194,33 +193,14 @@ Window {
         else if (App.camera.recording) App.camera.stopVideo()
         else if (App.analysis.running) App.analysis.stop()
     }
-    function takePhoto() {
-        App.nav.push("camera")
-        if (App.evidence.cameraConnected && App.camera.hasFrame && App.camera.savePhotoAsync())
-            commandNotice = "正在保存照片"
-        else commandNotice = App.camera.status || "请连接摄像头后拍照"
-    }
-    function toggleRecording() {
-        if (App.speech.recording) App.speech.stopRecording()
-        else App.speech.startRecording(false)
-    }
-    function saveCapture() { thermalSetup("image"); pageThermal.exportData(false) }
     function addDevice() {
         App.nav.push("devices")
         Qt.callLater(function() { pageDevices.deviceEditor.openDevice({}) })
     }
-    function openTask(create) {
-        App.nav.push("tasks", {asset_id: pageDevices.asset.id || ""})
-        Qt.callLater(function() {
-            if (!pageDevices.asset.id) commandNotice = "请先在设备列表选择设备"
-            else if (create) pageDevices.openManager("tasks", true)
-            else pageDevices.openInspection()
-        })
-    }
-    function newReport() { pageProject.newReport() }
     function registerAnalysisEvent() {
         const entry = (subsections[section] || []).find(item => item.id === subsection)
-        pageProject.registerAnalysis(entry ? entry.title : "人工观察")
+        const useSelectedEvent = subsection === "projectDiagnosis" || subsection === "events"
+        pageProject.registerAnalysis(entry ? entry.title : "人工观察", useSelectedEvent)
     }
     function showReport() {
         App.nav.push("reports")
@@ -235,11 +215,6 @@ Window {
     function rk1828() {
         App.projectInference.refresh()
         App.nav.push("settings", {section:"runtime"})
-    }
-    function closeTab() {
-        if (App.nav.page === "thermal") pageThermal.close()
-        if (App.nav.page === "legacyThermal") pageLegacy.close()
-        App.nav.push("projects")
     }
     function showHelp() { helpDialog.open() }
     function showVersion() { versionDialog.open() }
@@ -323,7 +298,8 @@ Window {
                             onNavigate: function(route) { rootWindow.navigateSubsection(route) }
                         }
                         TouchButton {
-                            visible: ["fusion","ai","events"].includes(rootWindow.section)
+                            objectName: "registerAnalysisEvent"
+                            visible: rootWindow.canRegisterEvent
                             enabled: !!App.projects.project.id && !!App.session.permissions.inspect
                             text: "手动登记事件"; autoWidth: true; height: 25
                             onClicked: rootWindow.registerAnalysisEvent()
@@ -333,21 +309,20 @@ Window {
                         Layout.fillWidth: true
                         Layout.fillHeight: true
                         currentIndex: rootWindow.pageIndex()
-                        DashboardPage {}
-                        TaskListPage {}
-                        InspectionPage {}
+                        InspectionPage { id: pageInspection }
                         CameraCapturePage {
+                            id: pageCamera
                             onPhotoForQuestion: function(path) { if (pageAi.importPhoto(path)) App.nav.push("ai") }
                             onProjectCapture: function(path, kind) { pageProject.attachCapture(path, kind) }
                         }
                         OperationsPage { id: pageDevices }
-                        DefectPage {}
-                        HistoryPage {}
-                        SettingsPage {}
+                        SettingsPage { id: pageSettings }
                         AiModelPage { id: pageAi }
-                        SignalAnalysisPage { onProjectCapture: function(path, kind) { pageProject.attachCapture(path, kind) } }
-                        UserManagementPage {}
-                        ProductPage {}
+                        SignalAnalysisPage {
+                            id: pageSignals
+                            onProjectCapture: function(path, kind) { pageProject.attachCapture(path, kind) }
+                        }
+                        ProductPage { id: pageProduct }
                         ThermalAnalysisPage {
                             id: pageThermal
                             onProjectCapture: function(paths, kind) { pageProject.attachCapture(paths, kind) }
@@ -355,6 +330,7 @@ Window {
                         ProjectPage {
                             id: pageProject
                             onPreviewReportRequested: rootWindow.showReport()
+                            onExportReportRequested: rootWindow.exportPdf()
                         }
                         LegacyThermalPage { id: pageLegacy }
                     }
@@ -376,7 +352,7 @@ Window {
                         id: properties
                         Layout.fillWidth: true
                         DesktopTab { text: "属性" }
-                        DesktopTab { text: "分析结果" }
+                        DesktopTab { text: "热像读数"; visible: rootWindow.thermalPage }
                     }
                     ScrollView {
                         id: inspectorScroll
@@ -429,25 +405,18 @@ Window {
                                 Label { text: "ROI：" + (thermal.stats.roi || "—") }
                             }
                             ColumnLayout {
-                                visible: properties.currentIndex === 1
+                                visible: properties.currentIndex === 1 && rootWindow.thermalPage
                                 Layout.fillWidth: true
                                 Label {
                                     Layout.fillWidth: true
                                     wrapMode: Text.Wrap
-                                    text: rootWindow.thermalPage ? thermal.status : App.projectInference.status
+                                    text: thermal.status
                                 }
                                 Label {
                                     Layout.fillWidth: true
                                     wrapMode: Text.Wrap
-                                    text: rootWindow.thermalPage
-                                        ? ("近 10 秒均温变化：" + rootWindow.value("trendDelta") + "\nROI 均温：" + rootWindow.value("ROI Avg") + "\n异常判断：未配置阈值")
-                                        : ((App.projectInference.subjectKind === "event" && App.projectInference.answer) || "选择工程融合事件后可查看分析结果。")
-                                }
-                                TouchButton {
-                                    visible: rootWindow.thermalPage
-                                    text: "打开融合分析"
-                                    autoWidth: true
-                                    onClicked: App.nav.push("fusion")
+                                    text: "近 10 秒均温变化：" + rootWindow.value("trendDelta")
+                                        + "\nROI 均温：" + rootWindow.value("ROI Avg")
                                 }
                             }
                         }
@@ -564,18 +533,18 @@ Window {
             const text = keyword.text.trim().toLowerCase()
             if (!text) { matches = []; return }
             const source = []
-            App.projects.devices.forEach(function(row) { source.push({name:row.name, kind:"设备", route:"projects"}) })
+            App.projects.devices.forEach(function(row) { source.push({name:row.name, kind:"设备", type:"device", id:row.id}) })
             App.projects.evidence.forEach(function(row) {
-                source.push({name:row.title + " / " + row.point, kind:"证据", route:"projectEvidence"})
+                source.push({name:row.title + " / " + row.point, kind:"资料", type:"evidence", id:row.id})
             })
-            App.projects.reports.forEach(function(row) { source.push({name:row.path, kind:"报告", route:"reports", id:row.id}) })
+            App.projects.reports.forEach(function(row) { source.push({name:row.path, kind:"报告", type:"report", id:row.id}) })
             matches = source.filter(function(row) { return row.name.toLowerCase().includes(text) })
         }
         ColumnLayout {
             anchors.fill: parent
             RowLayout {
                 Layout.fillWidth: true
-                TextField { id: keyword; Layout.fillWidth: true; placeholderText: "输入设备、证据或报告名称"; onAccepted: findDialog.search() }
+                TextField { id: keyword; Layout.fillWidth: true; placeholderText: "输入设备、资料或报告名称"; onAccepted: findDialog.search() }
                 TouchButton { text: "查找"; autoWidth: true; onClicked: findDialog.search() }
             }
             DataTable {
@@ -585,8 +554,7 @@ Window {
                 columns: [{key:"kind",title:"类别",width:70}, {key:"name",title:"名称",width:0}]
                 onRowDoubleClicked: function(index, row) {
                     findDialog.close()
-                    if (row.id) pageProject.reportId = row.id
-                    App.nav.push(row.route)
+                    pageProject.openResource(row.type, row.id)
                 }
             }
         }
@@ -601,10 +569,10 @@ Window {
         Label {
             width: parent.width
             wrapMode: Text.Wrap
-            text: "1. 在「文件」新建或打开 .miproj 工程。\n\n"
-                + "2. 在「设备」连接热像仪并测试，在「采集」控制记录。\n\n"
-                + "3. 在工程的证据管理页导入文件，在「分析」关联证据或执行诊断。\n\n"
-                + "4. 在「报告」选择报告、预览或导出 PDF。"
+            text: "1. 打开工程，在设备台账登记设备。\n\n"
+                + "2. 在「巡检执行」派发任务、填写巡检记录，并把现场资料归到相应设备与测点。\n\n"
+                + "3. 从工程资料发起融合诊断，再在事件台账复核结果、关联巡检记录和缺陷。\n\n"
+                + "4. 在「报告归档」查看正式巡检报告或导出事件分析报告。"
         }
     }
     Dialog {

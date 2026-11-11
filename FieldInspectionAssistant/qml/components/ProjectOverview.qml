@@ -62,10 +62,10 @@ Flickable {
             {id:"task", name:"派发与执行巡检", status:inspectionCounts.inProgress ? inspectionCounts.inProgress+" 项进行中"
                 : inspectionCounts.tasks ? inspectionCounts.tasks+" 项任务" : "待派发"},
             {id:"evidence", name:"归档现场资料", status:evidence ? evidence+" 份资料" : "待采集"},
-            {id:"diagnosis", name:"融合与工程诊断", status:diagnosed ? diagnosed+" 项已诊断" : candidates.length ? "待诊断" : "待融合"},
-            {id:"event", name:"事件复核与缺陷整改", status:inspectionCounts.openDefects ? inspectionCounts.openDefects+" 项未关闭"
+            {id:"diagnosis", name:"融合诊断", status:diagnosed ? diagnosed+" 项已诊断" : candidates.length ? "待诊断" : "待融合"},
+            {id:"event", name:"事件与整改", status:inspectionCounts.openDefects ? inspectionCounts.openDefects+" 项未关闭"
                 : related ? related+" 项已关联" : "待关联"},
-            {id:"report", name:"生成报告并归档", status:reports ? reports+" 份工程报告" : "待归档"}
+            {id:"report", name:"查看事件分析报告", status:reports ? reports+" 份报告" : "待归档"}
         ]
         return steps.map((step, index) => Object.assign({order:index + 1}, step))
     }
@@ -98,25 +98,20 @@ Flickable {
     }
 
     contentWidth: width
-    contentHeight: {
-        const panels = twoColumns ? workflowHeight + Math.max(previewHeight, 155) + 5
-                                  : 197 + workflowHeight + previewHeight + 155 + 15
-        return Math.max(height, commandBar.implicitHeight + 15 + panels)
-    }
+    contentHeight: Math.max(height, workArea.implicitHeight + 4)
     flickableDirection: Flickable.VerticalFlick
     boundsBehavior: Flickable.StopAtBounds
     ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
     clip: true
 
-    ColumnLayout {
+    Column {
         id: workArea
         width: overview.usableWidth
-        height: overview.contentHeight
         spacing: 5
 
         Rectangle {
-            Layout.fillWidth: true
-            implicitHeight: commandBar.implicitHeight + 10
+            width: workArea.width
+            height: commandBar.implicitHeight + 10
             color: "#ededed"
             border.color: "#b7b7b7"
             ColumnLayout {
@@ -145,22 +140,36 @@ Flickable {
             }
         }
 
-        GridLayout {
-            Layout.fillWidth: true
-            Layout.fillHeight: overview.twoColumns
-            columns: overview.twoColumns ? 2 : 1
-            columnSpacing: 6
-            rowSpacing: 5
+        GroupBox {
+            visible: !overview.hasProject
+            width: workArea.width
+            height: 210
+            title: "最近工程"
+            DataTable {
+                anchors.fill: parent
+                items: overview.workspace.recentProjects
+                emptyText: "暂无最近工程。请从文件菜单新建、打开或导入工程。"
+                columns: [{key:"name",title:"工程名称",width:160}, {key:"path",title:"位置",width:0}]
+                onRowDoubleClicked: function(index, item) { overview.recentRequested(item.url) }
+            }
+        }
+        Item {
+            id: projectPanels
+            visible: overview.hasProject
+            width: workArea.width
+            readonly property int gap: 5
+            readonly property real leftWidth: overview.plotColumnWidth
+            readonly property real rightX: overview.twoColumns ? leftWidth + gap : 0
+            readonly property real rightWidth: width - rightX
+            readonly property int topHeight: overview.twoColumns ? overview.workflowHeight : 197
+            readonly property real lowerY: overview.twoColumns ? topHeight + gap : workflow.y + workflow.height + gap
+            height: activity.y + activity.height
 
             GroupBox {
                 title: "现场资料分布"
                 padding: 5
-                Layout.fillWidth: true
-                Layout.preferredWidth: 640
-                Layout.minimumWidth: 0
-                Layout.fillHeight: overview.twoColumns
-                Layout.preferredHeight: overview.twoColumns ? overview.workflowHeight : 197
-                Layout.minimumHeight: 197
+                width: projectPanels.leftWidth
+                height: projectPanels.topHeight
                 ColumnLayout {
                     anchors.fill: parent
                     spacing: 2
@@ -183,18 +192,17 @@ Flickable {
                                 }
                             }
                         }
-                        ColumnLayout {
+                        Column {
+                            id: bars
                             anchors { fill: parent; topMargin: 3; bottomMargin: 3 }
-                            spacing: 0
                             Repeater {
                                 model: overview.distribution
                                 delegate: Button {
                                     id: barButton
                                     required property var modelData
                                     objectName: "projectEvidenceBar-" + modelData.id
-                                    Layout.fillWidth: true
-                                    Layout.fillHeight: true
-                                    Layout.minimumHeight: 19
+                                    width: bars.width
+                                    height: bars.height / overview.distribution.length
                                     padding: 0
                                     enabled: modelData.count > 0
                                     onClicked: overview.evidenceRequested(modelData.id)
@@ -252,12 +260,11 @@ Flickable {
             }
 
             ColumnLayout {
-                Layout.fillWidth: true
-                Layout.fillHeight: true
-                Layout.minimumHeight: overview.workflowHeight
-                Layout.preferredHeight: overview.workflowHeight
-                Layout.preferredWidth: 410
-                Layout.minimumWidth: 0
+                id: workflow
+                x: projectPanels.rightX
+                y: overview.twoColumns ? 0 : projectPanels.topHeight + projectPanels.gap
+                width: projectPanels.rightWidth
+                height: overview.workflowHeight
                 spacing: 5
 
                 GroupBox {
@@ -297,40 +304,37 @@ Flickable {
             }
 
             GroupBox {
-                title: overview.imageFiles.length ? "现场影像" : "最近工程"
+                id: previews
+                title: "现场影像"
                 padding: 5
-                Layout.fillWidth: true
-                Layout.preferredWidth: 640
-                Layout.minimumWidth: 0
-                Layout.fillHeight: overview.twoColumns
-                Layout.preferredHeight: overview.previewHeight
-                Layout.minimumHeight: overview.previewHeight
+                y: projectPanels.lowerY
+                width: projectPanels.leftWidth
+                height: overview.twoColumns ? Math.max(overview.previewHeight, 155) : overview.previewHeight
 
-                DataTable {
-                    anchors.fill: parent
+                Label {
+                    anchors.centerIn: parent
+                    width: parent.width - 16
                     visible: !overview.imageFiles.length
-                    rowHeight: 24
-                    items: overview.workspace.recentProjects
-                    emptyText: "暂无最近打开的工程"
-                    columns: [{key:"name",title:"工程名称",width:128}, {key:"path",title:"位置",width:0}]
-                    onRowDoubleClicked: function(index, item) { overview.recentRequested(item.url) }
+                    text: "归档照片或热像后可在这里查看。"
+                    horizontalAlignment: Text.AlignHCenter
+                    wrapMode: Text.Wrap
+                    color: Colors.textSecondary
                 }
-                GridLayout {
+                Grid {
+                    id: thumbnailGrid
                     anchors.fill: parent
                     visible: overview.imageFiles.length > 0
-                    columns: overview.thumbnailColumns
-                    columnSpacing: 5
-                    rowSpacing: 5
+                    columns: Math.max(1, Math.min(overview.thumbnailColumns, overview.imageFiles.length))
+                    rows: Math.max(1, Math.ceil(overview.imageFiles.length / columns))
+                    spacing: 5
                     Repeater {
                         model: overview.imageFiles
                         delegate: Button {
                             id: imageButton
                             required property var modelData
                             readonly property var preview: overview.workspace.evidenceFile(modelData.id)
-                            Layout.fillWidth: true
-                            Layout.fillHeight: true
-                            Layout.preferredWidth: 180
-                            Layout.minimumWidth: 0
+                            width: Math.max(0, (thumbnailGrid.width + thumbnailGrid.spacing) / thumbnailGrid.columns - thumbnailGrid.spacing)
+                            height: Math.max(0, (thumbnailGrid.height + thumbnailGrid.spacing) / thumbnailGrid.rows - thumbnailGrid.spacing)
                             padding: 3
                             enabled: !!preview.url
                             onClicked: overview.previewRequested(modelData.id)
@@ -368,14 +372,13 @@ Flickable {
             }
 
             GroupBox {
+                id: activity
                 title: "操作记录"
                 padding: 5
-                Layout.fillWidth: true
-                Layout.preferredWidth: 410
-                Layout.minimumWidth: 0
-                Layout.fillHeight: overview.twoColumns
-                Layout.preferredHeight: 155
-                Layout.minimumHeight: 120
+                x: projectPanels.rightX
+                y: overview.twoColumns ? projectPanels.lowerY : previews.y + previews.height + projectPanels.gap
+                width: projectPanels.rightWidth
+                height: overview.twoColumns ? previews.height : 155
                 DataTable {
                     anchors.fill: parent
                     rowHeight: 23

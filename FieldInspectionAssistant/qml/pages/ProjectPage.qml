@@ -24,13 +24,12 @@ Rectangle {
     property string inspectionFilter: ""
     property string evidenceRecordId: ""
     property string evidenceAssetId: ""
-    property string evidenceScopeDevice: ""
+    property string graphDeviceId: ""
     readonly property string route: App.nav.page
     readonly property bool eventMode: route === "events"
     readonly property bool diagnosisMode: route === "projectDiagnosis"
     readonly property var activeEvent: workspace.events.find(row => row.id === page.eventId) || ({})
-    readonly property bool canOpenActiveEvent: !!activeEvent.id &&
-        !!(activeEvent.analyzed || activeEvent.source || activeEvent.review_result || activeEvent.record_id)
+    readonly property bool canOpenActiveEvent: isRegisteredEvent(activeEvent)
     readonly property string liveDiagnosis: inference.eventId === eventId ? inference.answer : ""
     readonly property bool hasDiagnosis: !!liveDiagnosis || !!activeEvent.analyzed
     readonly property string diagnosisText: liveDiagnosis || (activeEvent.analyzed
@@ -38,13 +37,18 @@ Rectangle {
         ? (workspace.analysisInput(eventId).summary || activeEvent.note || "")
         : "选择诊断对象后，可核对其关联证据。")
     readonly property var visibleEvents: workspace.events.filter(function(row) {
-        return (page.route !== "fusion" || !row.source)
-            && (!page.eventDeviceId || row.device_id === page.eventDeviceId)
-            && (!page.eventMode || row.analyzed || row.source || row.review_result || row.record_id)
+        return (!page.eventDeviceId || row.device_id === page.eventDeviceId)
+            && (!page.eventMode || page.isRegisteredEvent(row))
             && (!page.eventMode || !page.eventFilter || page.eventFilter === row.classification)
             && (!page.eventMode || !page.inspectionFilter || page.inspectionFilter === row.record_id)
     })
-    readonly property string selectedReport: reportId || (workspace.reports.length ? workspace.reports[0].id : "")
+    readonly property var reportableEvents: workspace.events.filter(row => page.isRegisteredEvent(row))
+    readonly property var activeReport: workspace.reports.find(row => row.id === reportId) || workspace.reports[0] || ({})
+    readonly property string selectedReport: activeReport.id || ""
+    readonly property var reportRows: workspace.reports.map(function(report) {
+        const event = workspace.events.find(row => row.id === report.event_id)
+        return Object.assign({}, report, {eventTitle: event ? event.title : "—"})
+    })
     readonly property var kinds: [{id:"image",label:"照片"}, {id:"audio",label:"音频"}, {id:"thermal",label:"热像"},
                                   {id:"signal",label:"信号"}, {id:"video",label:"视频"}, {id:"text",label:"文字"}]
     readonly property var visibleEvidence: workspace.evidence.filter(function(row) {
@@ -55,6 +59,7 @@ Rectangle {
         return Object.assign({}, row, {kindLabel: kind ? kind.label : row.kind})
     })
     signal previewReportRequested()
+    signal exportReportRequested()
     AnalysisReviewDialog { id: reportReview }
 
     onProjectIdChanged: {
@@ -69,7 +74,7 @@ Rectangle {
         inspectionFilter = ""
         evidenceRecordId = ""
         evidenceAssetId = ""
-        evidenceScopeDevice = ""
+        graphDeviceId = ""
         pointField.text = ""
         timeField.text = ""
         captureDialog.close()
@@ -79,19 +84,15 @@ Rectangle {
         defectDialog.close()
         reportReview.close()
     }
+    function isRegisteredEvent(event) {
+        return !!event && !!event.id && !!(event.analyzed || event.source || event.review_result || event.record_id)
+    }
     function newProject() { App.nav.push("projects"); Qt.callLater(function() { createDialog.open() }) }
     function openProject() { App.nav.push("projects"); Qt.callLater(function() { openFolder.open() }) }
     function importProject() { App.nav.push("projects"); Qt.callLater(function() { importFolder.open() }) }
     function openDemoProject() { App.nav.push("projects"); showResult(workspace.openDemoProject(), "演示工程已打开") }
-    function addDevice() { deviceDialog.open() }
     function showEvidence(kind) {
-        evidenceRecordId = ""
-        evidenceAssetId = ""
-        evidenceScopeDevice = ""
-        evidenceKind = kind || ""
-        deviceId = ""
-        evidenceId = ""
-        App.nav.push("projectEvidence")
+        App.nav.push("projectEvidence", {kind:kind || ""})
     }
     function attachCapture(paths, kind) {
         if (!projectId || !paths || !paths.length) return
@@ -104,16 +105,17 @@ Rectangle {
         })
     }
     function openResource(type, id) {
-        if (type === "device" || type === "evidence") {
+        if (type === "device") {
+            const device = workspace.devices.find(row => row.id === id)
+            if (device && device.asset_id) App.nav.push("devices", {asset_id:device.asset_id})
+            else App.nav.push("projectEvidence", {device_id:id})
+        } else if (type === "evidence") {
             showEvidence("")
-            if (type === "device") deviceId = id
-            else {
-                evidenceId = id
-                Qt.callLater(function() { page.openEvidence(id) })
-            }
+            evidenceId = id
+            Qt.callLater(function() { page.openEvidence(id) })
         } else if (type === "event") {
             const item = workspace.events.find(row => row.id === id)
-            const recorded = item && (item.analyzed || item.source || item.review_result || item.record_id)
+            const recorded = isRegisteredEvent(item)
             App.nav.push(recorded ? "events" : "projectDiagnosis", {event_id:id})
         } else if (type === "report") {
             reportId = id
@@ -143,24 +145,24 @@ Rectangle {
         evidenceDialog.playbackError = ""
         evidenceDialog.open()
     }
-    function newReport() {
+    function newReport(sourceEventId) {
+        reportSource.eventId = sourceEventId || ""
         App.nav.push("reports")
         Qt.callLater(function() {
-            if (workspace.events.length) reportSource.open()
-            else message = "先关联现场资料生成融合事件，再生成工程报告。"
+            if (page.reportableEvents.length) reportSource.open()
         })
     }
     function showSection() {
-        if (route === "projectEvidence" && App.nav.param("device_id")) {
-            deviceId = App.nav.param("device_id")
+        if (route === "projectEvidence") {
+            deviceId = App.nav.param("device_id") || ""
             evidenceRecordId = App.nav.param("capture_record_id") || ""
             evidenceAssetId = App.nav.param("asset_id") || ""
-            evidenceScopeDevice = evidenceRecordId ? deviceId : ""
+            evidenceKind = App.nav.param("kind") || ""
             evidenceId = ""
-            evidenceKind = ""
-        } else if (route === "projectEvidence" && evidenceScopeDevice) deviceId = evidenceScopeDevice
+        }
+        if (route === "projectGraph") graphDeviceId = App.nav.param("device_id") || ""
         if (diagnosisMode) inference.refresh()
-        if (route === "fusion" || route === "projectDiagnosis" || route === "events") {
+        if (diagnosisMode || eventMode) {
             eventDeviceId = App.nav.param("device_id") || ""
             if (route === "events") {
                 eventFilter = ""
@@ -184,7 +186,7 @@ Rectangle {
     }
     function makeEvent() {
         const result = workspace.fuse(evidenceId)
-        if (showResult(result, "融合事件已保存")) {
+        if (showResult(result, "已生成诊断对象")) {
             eventId = result.id
             App.nav.push("projectDiagnosis", {event_id:result.id})
         }
@@ -198,19 +200,20 @@ Rectangle {
         if (activeEvent.record_id && activeEvent.asset_id)
             App.nav.push("history", {asset_id:activeEvent.asset_id, source_id:activeEvent.record_id})
     }
-    function registerAnalysis(source) {
+    function registerAnalysis(source, useSelectedEvent) {
+        if (!projectId) return
         manualEvent.sourceLabel = source
-        manualEvent.anchorId = activeEvent.anchor_id || evidenceId
-        App.nav.push("events")
-        Qt.callLater(function() { if (page.projectId) manualEvent.open() })
+        manualEvent.anchorId = useSelectedEvent ? (activeEvent.anchor_id || "") : ""
+        manualEvent.open()
     }
 
     Dialog {
         id: manualEvent
         objectName: "manualAnalysisEvent"
         title: "登记分析事件"
+        parent: Overlay.overlay
         anchors.centerIn: parent; modal: true
-        width: Math.min(515, page.width - 16)
+        width: Math.min(515, (parent ? parent.width : page.width) - 16)
         property string sourceLabel: ""
         property string anchorId: ""
         property string feedback: ""
@@ -218,7 +221,7 @@ Rectangle {
             manualEvidence.currentIndex = workspace.evidence.findIndex(row => row.id === anchorId)
             manualTime.text = new Date().toISOString()
             manualTitle.text = ""; manualNote.text = ""; manualClass.currentIndex = 0
-            feedback = workspace.evidence.length ? "" : "请先在资料与文字中归档相关证据。"
+            feedback = workspace.evidence.length ? "" : "请先在工程资料中归档相关证据。"
         }
         contentItem: ColumnLayout {
             Label { text: "分析来源  " + manualEvent.sourceLabel }
@@ -335,11 +338,11 @@ Rectangle {
             }
             AppComboBox {
                 id: captureDevice; Layout.fillWidth: true
-                model: page.evidenceScopeDevice ? workspace.devices.filter(row => row.id === page.evidenceScopeDevice) : workspace.devices
+                model: workspace.devices
                 textRole: "name"; valueRole: "id"
                 displayText: currentIndex < 0 ? "选择工程设备" : currentText
             }
-            Label { visible: !workspace.devices.length; text: "请先在工程资料页新增设备，或从设备管理登记到工程。" }
+            Label { visible: !workspace.devices.length; text: "请先在设备台账登记到工程。" }
             TextField { id: capturePoint; Layout.fillWidth: true; placeholderText: "测点"; maximumLength: 120 }
             Label { Layout.fillWidth: true; visible: !!captureDialog.feedback; text: captureDialog.feedback; wrapMode: Text.Wrap }
         }
@@ -436,17 +439,18 @@ Rectangle {
     }
     Dialog {
         id: reportSource
-        title: "从事件生成工程报告"
+        title: "生成事件分析报告"
+        property string eventId: ""
         anchors.centerIn: parent
         width: Math.min(440, page.width - 16)
         modal: true
         onOpened: {
-            const index = workspace.events.findIndex(row => row.id === page.eventId)
-            reportEvent.currentIndex = index >= 0 ? index : workspace.events.length === 1 ? 0 : -1
+            const index = page.reportableEvents.findIndex(row => row.id === reportSource.eventId)
+            reportEvent.currentIndex = index >= 0 ? index : page.reportableEvents.length === 1 ? 0 : -1
         }
         contentItem: AppComboBox {
             id: reportEvent
-            model: workspace.events.map(row => ({id:row.id, name:row.device + " · " + row.point + " · " + row.title}))
+            model: page.reportableEvents.map(row => ({id:row.id, name:row.device + " · " + row.point + " · " + row.title}))
             textRole: "name"; valueRole: "id"
             displayText: currentIndex < 0 ? "选择事件" : currentText
         }
@@ -480,33 +484,6 @@ Rectangle {
             TextField { id: nameField; Layout.fillWidth: true; placeholderText: "工程名称"; maximumLength: 80 }
             TouchButton { text: "选择目录"; autoWidth: true; onClicked: parentFolder.open() }
             Label { Layout.fillWidth: true; text: createDialog.folder.toString() || "默认使用应用的工程存储目录"; wrapMode: Text.WrapAnywhere }
-        }
-    }
-    Dialog {
-        id: deviceDialog
-        title: "登记工程设备"
-        anchors.centerIn: parent
-        width: Math.min(350, page.width - 20)
-        modal: true
-        standardButtons: Dialog.Ok | Dialog.Cancel
-        onOpened: deviceName.text = ""
-        onAccepted: page.showResult(workspace.addDevice(deviceName.text), "工程设备已添加")
-        ColumnLayout {
-            width: parent.width
-            Label {
-                Layout.fillWidth: true
-                visible: workspace.devices.length > 0
-                text: "已登记：" + workspace.devices.map(function(device) { return device.name }).join("、")
-                wrapMode: Text.Wrap
-                maximumLineCount: 4
-                elide: Text.ElideRight
-            }
-            TextField {
-                id: deviceName
-                Layout.fillWidth: true
-                placeholderText: "输入新设备名称"
-                maximumLength: 100
-            }
         }
     }
     Dialog {
@@ -598,7 +575,7 @@ Rectangle {
             Layout.fillWidth: true; Layout.fillHeight: true
             currentIndex: page.route === "projectEvidence" ? 1
                 : page.route === "reports" ? 3 : page.route === "projectGraph" ? 4
-                : page.diagnosisMode ? 5 : page.route === "fusion" || page.eventMode ? 2 : 0
+                : page.diagnosisMode ? 5 : page.eventMode ? 2 : 0
             ProjectOverview {
                 workspace: page.workspace
                 message: page.message
@@ -626,7 +603,11 @@ Rectangle {
                     Layout.fillWidth: true
                     Layout.preferredHeight: childrenRect.height
                     spacing: 5
-                    TouchButton { text: "新增工程设备"; autoWidth: true; enabled: !!page.projectId; visible: !page.evidenceRecordId; onClicked: page.addDevice() }
+                    TouchButton {
+                        text: "到台账登记设备"; autoWidth: true; enabled: !!page.projectId
+                        visible: !page.evidenceRecordId
+                        onClicked: App.nav.push("devices")
+                    }
                     AppComboBox {
                         id: devices
                         width: 130; height: 30
@@ -658,8 +639,9 @@ Rectangle {
                         onClicked: textDialog.open()
                     }
                     TouchButton { text: "查看原始资料"; autoWidth: true; enabled: !!page.evidenceId; onClicked: page.openEvidence(page.evidenceId) }
-                    TouchButton { text: "生成融合事件"; autoWidth: true; enabled: !!page.evidenceId; onClicked: page.makeEvent() }
-                    TouchButton { text: "多模态图谱"; autoWidth: true; enabled: !!page.projectId; onClicked: App.nav.push("projectGraph") }
+                    TouchButton { objectName: "createFusionDiagnosis"
+                        text: "生成融合诊断"; autoWidth: true; variant: "primary"; enabled: !!page.evidenceId; onClicked: page.makeEvent() }
+                    TouchButton { text: "多模态图谱"; autoWidth: true; enabled: !!page.projectId; onClicked: App.nav.push("projectGraph", {device_id:page.deviceId}) }
                     TouchButton {
                         text: "清除筛选"; autoWidth: true; visible: !page.evidenceRecordId && (!!page.deviceId || !!page.evidenceKind)
                         onClicked: { page.deviceId = ""; page.evidenceKind = ""; page.evidenceId = "" }
@@ -697,23 +679,8 @@ Rectangle {
                         onClicked: App.nav.push("events", {event_id:page.eventId})
                     }
                     TouchButton {
-                        visible: page.eventMode
-                        text: "RK1828 分析"; autoWidth: true
-                        enabled: inference.ready && !inference.busy && page.eventId.length > 0
-                        onClicked: inference.analyze(page.eventId)
-                    }
-                    TouchButton {
-                        visible: !page.eventMode
-                        text: "从原始资料生成"; autoWidth: true; onClicked: page.showEvidence("")
-                    }
-                    TouchButton {
-                        text: "进入工程诊断"; autoWidth: true; enabled: !!page.eventId
+                        text: "查看诊断"; autoWidth: true; enabled: !!page.eventId
                         onClicked: App.nav.push("projectDiagnosis", {event_id:page.eventId})
-                    }
-                    TouchButton {
-                        visible: !page.eventMode
-                        text: "查看事件"; autoWidth: true; enabled: page.canOpenActiveEvent
-                        onClicked: App.nav.push("events", {event_id:page.eventId})
                     }
                     TouchButton {
                         text: "查看基准资料"; autoWidth: true; enabled: !!page.activeEvent.anchor_id
@@ -742,8 +709,8 @@ Rectangle {
                     }
                     TouchButton {
                         visible: page.eventMode
-                        text: "生成报告…"; autoWidth: true; enabled: !!page.eventId
-                        onClicked: page.newReport()
+                        text: "生成事件分析报告…"; autoWidth: true; enabled: !!page.eventId
+                        onClicked: page.newReport(page.eventId)
                     }
                     AppComboBox {
                         visible: page.eventMode && !!App.session.permissions.review
@@ -767,7 +734,7 @@ Rectangle {
                     Layout.preferredHeight: 240
                     items: page.visibleEvents
                     selectedIndex: items.findIndex(function(row) { return row.id === page.eventId })
-                    columns: [{key:"title",title:page.route === "fusion" ? "证据包" : "事件或诊断对象",width:0}, {key:"device",title:"设备",width:100},
+                    columns: [{key:"title",title:"事件",width:0}, {key:"device",title:"设备",width:100},
                               {key:"point",title:"测点",width:85}, {key:"classificationLabel",title:"判定",width:68},
                               {key:"observed",title:"发生时间",width:130}]
                     onRowClicked: function(index, item) { page.eventId = item.id }
@@ -781,46 +748,66 @@ Rectangle {
                     TextArea {
                         text: page.eventMode && inference.eventId === page.eventId && inference.answer
                             ? inference.answer
-                            : page.activeEvent.analyzed && page.route !== "fusion"
+                            : page.activeEvent.analyzed
                                 ? workspace.findingForEvent(page.eventId)
                                 : page.activeEvent.note
                                     ? page.activeEvent.source + "\n" + page.activeEvent.note
                                 : page.activeEvent.id
                                     ? (workspace.analysisInput(page.eventId).summary || "")
-                                    : "选择同一设备、同一测点前后 60 秒内的至少两种现场资料生成融合事件。"
+                                    : "事件台账显示已分析或手动登记的事件。选择事件可查看依据、复核判定或关联整改。"
                         textFormat: TextEdit.PlainText
                         readOnly: true; selectByMouse: true; wrapMode: TextEdit.Wrap
                     }
                 }
             }
             ColumnLayout {
-                RowLayout {
-                    TouchButton { text: "从事件生成报告…"; autoWidth: true; enabled: !!page.projectId; onClicked: page.newReport() }
-                    TouchButton { text: "AI 复核报告"; autoWidth: true; enabled: !!page.selectedReport; onClicked: reportReview.review("projectReport", page.selectedReport) }
+                Flow {
+                    Layout.fillWidth: true
+                    Layout.preferredHeight: childrenRect.height
+                    spacing: 4
+                    TouchButton {
+                        text: "从事件生成报告…"; autoWidth: true; variant: "primary"
+                        enabled: page.reportableEvents.length > 0; onClicked: page.newReport()
+                    }
+                    TouchButton { text: "预览"; autoWidth: true; enabled: !!page.selectedReport; onClicked: page.previewReportRequested() }
+                    TouchButton { text: "导出 PDF…"; autoWidth: true; enabled: !!page.selectedReport; onClicked: page.exportReportRequested() }
+                    TouchButton { text: "AI 复核"; autoWidth: true; enabled: !!page.selectedReport; onClicked: reportReview.review("projectReport", page.selectedReport) }
+                    TouchButton {
+                        text: "打开来源事件"; autoWidth: true
+                        enabled: page.reportableEvents.some(row => row.id === page.activeReport.event_id)
+                        onClicked: App.nav.push("events", {event_id:page.activeReport.event_id})
+                    }
                 }
                 DataTable {
                     spreadsheet: true
                     Layout.fillWidth: true; Layout.fillHeight: true
-                    items: workspace.reports
+                    objectName: "eventReportTable"
+                    emptyText: "暂无事件分析报告。请先在事件台账选择要报告的事件。"
+                    items: page.reportRows
                     selectedIndex: items.findIndex(function(row) { return row.id === page.selectedReport })
                     onRowClicked: function(index, item) { page.reportId = item.id }
                     onRowDoubleClicked: function(index, item) {
                         page.reportId = item.id
                         page.previewReportRequested()
                     }
-                    columns: [{key:"path",title:"工程内报告路径",width:0},
+                    columns: [{key:"eventTitle",title:"来源事件",width:0}, {key:"path",title:"报告文件",width:190},
                               {key:"created_at",title:"导出时间",width:138,format:"datetime"}]
                 }
             }
             ColumnLayout {
                 RowLayout {
                     Layout.fillWidth: true
+                    TouchButton {
+                        text: "返回工程资料"; autoWidth: true
+                        onClicked: App.nav.push("projectEvidence", {device_id:page.deviceId,
+                            capture_record_id:page.evidenceRecordId, asset_id:page.evidenceAssetId, kind:page.evidenceKind})
+                    }
                     AppComboBox {
                         Layout.preferredWidth: 170; height: 30
                         model: [{id:"", name:"全部设备"}].concat(workspace.devices)
                         textRole: "name"; valueRole: "id"
-                        currentIndex: model.findIndex(row => row.id === page.deviceId)
-                        onActivated: { page.deviceId = currentValue; graph.selectedId = "" }
+                        currentIndex: model.findIndex(row => row.id === page.graphDeviceId)
+                        onActivated: { page.graphDeviceId = currentValue; graph.selectedId = "" }
                     }
                     TouchButton { text: "适应窗口"; autoWidth: true; onClicked: graph.fit() }
                     TouchButton { text: "放大"; autoWidth: true; onClicked: graph.zoomIn() }
@@ -840,7 +827,7 @@ Rectangle {
                     Layout.fillWidth: true; Layout.fillHeight: true
                     dynamicLayout: false
                     graph: page.route === "projectGraph" && workspace.evidence.length
-                        ? workspace.evidenceGraph(page.deviceId) : ({})
+                        ? workspace.evidenceGraph(page.graphDeviceId) : ({})
                 }
                 Label {
                     Layout.fillWidth: true

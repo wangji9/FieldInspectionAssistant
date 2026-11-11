@@ -7,6 +7,7 @@ Rectangle {
     id:root;objectName:"operationsPage";color:Colors.background
     property var assets:[]
     property var asset:({})
+    readonly property var projectDevice: App.projects.devices.find(device => device.asset_id === asset.id) || ({})
     property var rows:[]
     property var selected:({})
     property var timeline:[]
@@ -45,7 +46,24 @@ Rectangle {
     }
     function chooseAsset(row){asset=row;page=0;selected={};statusFilter="";keyword="";refresh()}
     function setView(value){view=value;page=0;selected={};keyword="";statusFilter="";refresh()}
-    function setup(){var id=App.nav.param("asset_id"),next=App.nav.param("view")||"records";if(view!==next){page=0;selected={};keyword="";statusFilter=""}view=next;reloadAssets(id||"");var source=App.nav.param("source_id");if(source&&view!=="device"&&asset.id)Qt.callLater(function(){recordWindow.openFor(root.view,source)})}
+    function setup() {
+        const requestedAsset = App.nav.param("asset_id") || ""
+        const nextView = App.nav.param("view") || "records"
+        if (view !== nextView) {
+            page = 0
+            selected = ({})
+            keyword = ""
+            statusFilter = ""
+        }
+        view = nextView
+        if (requestedAsset) deviceSearch = ""
+        const projectAssets = App.projects.devices.filter(device => !!device.asset_id)
+        const preferredAsset = projectAssets.length === 1 && !asset.id ? projectAssets[0].asset_id : ""
+        reloadAssets(requestedAsset || preferredAsset)
+        const source = App.nav.param("source_id")
+        if (source && view !== "device" && asset.id)
+            Qt.callLater(function() { recordWindow.openFor(root.view, source) })
+    }
     function openInspection(){inspectionEntry.openFor(root.asset)}
     function openManager(section,create){management.openFor(section||view,!!create)}
     function openTask(task){if(task.status==="completed"){App.nav.push("inspection",{taskId:task.id,taskName:task.name,taskCode:task.task_code||task.code});return}selected=task;begin()}
@@ -70,8 +88,8 @@ Rectangle {
         Rectangle {
             Layout.preferredWidth:root.width<900?185:235;Layout.minimumWidth:140;Layout.fillHeight:true;color:Colors.panel;border.color:Colors.border
             ColumnLayout {anchors.fill:parent;anchors.margins:10;spacing:10
-                RowLayout {Layout.fillWidth:true;Text {text:"设备";font.pixelSize:Typography.h2;color:Colors.text;Layout.fillWidth:true}TouchButton {objectName:"manageDevices";text:"管理";autoWidth:true;onClicked:root.openManager("device",false)}}
-                FieldInput {objectName:"workflowDeviceSearch";Layout.fillWidth:true;height:34;placeholder:"搜索设备";onTextEdited:function(v){root.deviceSearch=v;root.reloadAssets()}}
+                Text {Layout.fillWidth:true;text:"设备";font.pixelSize:Typography.h2;color:Colors.text}
+                FieldInput {objectName:"workflowDeviceSearch";Layout.fillWidth:true;height:34;placeholder:"搜索设备";text:root.deviceSearch;onTextEdited:function(v){root.deviceSearch=v;root.reloadAssets()}}
                 ListView {Layout.fillWidth:true;Layout.fillHeight:true;clip:true;model:root.assets;spacing:6;ScrollBar.vertical:ScrollBar{}
                     delegate:Rectangle {required property var modelData;width:ListView.view.width;height:60;color:root.asset.id===modelData.id?Colors.infoDark:Colors.panel
                         Column {anchors.fill:parent;anchors.margins:10;spacing:6;Text {width:parent.width;text:modelData.name;elide:Text.ElideRight;font.pixelSize:Typography.body;font.weight:Font.Medium;color:Colors.text}Text {width:parent.width;text:modelData.code;elide:Text.ElideRight;font.pixelSize:Typography.body;color:Colors.textSecondary}}
@@ -88,19 +106,21 @@ Rectangle {
             RowLayout {Layout.fillWidth:true
                 Text {Layout.fillWidth:true;text:root.asset.name||"巡检管理";elide:Text.ElideRight;font.pixelSize:Typography.h2;font.weight:Font.DemiBold;color:Colors.text}
                 TouchButton {
-                    text:"登记到工程"; autoWidth:true; visible:root.view==="device"
-                    enabled:!!App.projects.project.id
-                    onClicked:{
+                    text: root.projectDevice.id ? "查看工程资料" : "登记到工程"
+                    autoWidth: true
+                    visible: root.view === "device"
+                    enabled: !!App.projects.project.id
+                    onClicked: {
+                        if (root.projectDevice.id) {
+                            App.nav.push("projectEvidence", {device_id:root.projectDevice.id})
+                            return
+                        }
                         const result = App.projects.registerAsset(root.asset.id)
                         if (result.ok) App.nav.push("projectEvidence", {device_id:result.id})
                         else root.message = result.error
                     }
                 }
-                TouchButton {objectName:"workflowSettingsButton";text:"管理与设置";autoWidth:true;onClicked:root.openManager(root.view,false)}
-            }
-            RowLayout {Layout.fillWidth:true;spacing:3;visible:root.view==="tasks"
-                Item {Layout.fillWidth:true}
-                TouchButton {objectName:"workflowStart";visible:root.view==="tasks";text:root.selected.status==="in_progress"?"继续巡检":"开始巡检";height:32;autoWidth:true;variant:"primary";enabled:!!root.selected.id&&root.selected.status!=="completed";onClicked:root.begin()}
+                TouchButton {objectName:"workflowSettingsButton";text:root.view==="device"?"设备配置":root.view==="tasks"?"计划与交接":"记录管理";autoWidth:true;onClicked:root.openManager(root.view,false)}
             }
             InspectionFlow {
                 Layout.fillWidth:true; Layout.preferredHeight:108
@@ -114,9 +134,31 @@ Rectangle {
                     } else root.setView(stage==="dispatch"||stage==="inspect"?"tasks":stage==="remediate"||stage==="review"?"defects":"records")
                 }
             }
-            RowLayout{Layout.fillWidth:true;spacing:8
-                FieldInput{Layout.fillWidth:true;height:34;placeholder:"搜索当前设备记录";text:root.keyword;onTextEdited:function(v){root.keyword=v;root.page=0;root.refresh()}}
-                TouchButton{objectName:"directWorkflowNew";text:root.view==="tasks"?"派发任务":root.view==="records"?"新增巡检":root.view==="defects"?"登记缺陷":"编辑设备";autoWidth:true;height:34;variant:"primary";enabled:root.view==="device"?App.session.permissions.manage_assets:root.view==="tasks"?App.session.permissions.assign:root.view==="defects"?App.session.permissions.register_defect:App.session.permissions.inspect;onClicked:if(root.view==="device")deviceForm.openDevice(root.asset);else if(root.view==="records")root.openInspection();else management.openEditor(root.view,true)}
+            FieldInput {
+                visible: root.view !== "device"
+                Layout.fillWidth: true; height: 34
+                placeholder: "搜索当前设备记录"
+                text: root.keyword
+                onTextEdited: function(value) { root.keyword = value; root.page = 0; root.refresh() }
+            }
+            Flow {
+                Layout.fillWidth: true
+                Layout.preferredHeight: childrenRect.height
+                spacing: 4
+                TouchButton {
+                    objectName: "workflowStart"
+                    visible: root.view === "tasks"
+                    text: root.selected.status === "in_progress" ? "继续巡检" : "开始巡检"
+                    height: 34; autoWidth: true; variant: "primary"
+                    enabled: !!root.selected.id && root.selected.status !== "completed"
+                    onClicked: root.begin()
+                }
+                TouchButton{objectName:"directWorkflowNew";text:root.view==="tasks"?"派发任务":root.view==="records"?"新增巡检":root.view==="defects"?"登记缺陷":"编辑设备";autoWidth:true;height:34;variant:root.view==="tasks"?"secondary":"primary";enabled:root.view==="device"?App.session.permissions.manage_assets:root.view==="tasks"?App.session.permissions.assign:root.view==="defects"?App.session.permissions.register_defect:App.session.permissions.inspect;onClicked:if(root.view==="device")deviceForm.openDevice(root.asset);else if(root.view==="records")root.openInspection();else management.openEditor(root.view,true)}
+                TouchButton {
+                    text: "查看详情"; autoWidth: true; height: 34
+                    visible: root.view !== "device"; enabled: !!root.selected.id
+                    onClicked: recordWindow.openFor(root.view, root.selected.id)
+                }
                 TouchButton {
                     text:"AI 分析"; autoWidth:true; height:34; visible:root.view!=="device"; enabled:!!root.selected.id
                     onClicked: operationReview.review(root.view==="tasks" ? "task" : root.view==="defects" ? "defect" : "inspection", root.selected.id)
@@ -127,7 +169,7 @@ Rectangle {
             Text {visible:root.message.length>0;Layout.fillWidth:true;text:root.message;wrapMode:Text.Wrap;color:Colors.danger;font.pixelSize:Typography.body}
             Rectangle {
                 Layout.fillWidth:true;Layout.fillHeight:true;color:Colors.panel;border.color:Colors.border
-                DataTable {objectName:"workflowTable";visible:root.view!=="device";anchors.fill:parent;items:root.rows;columns:root.visibleColumns();selectedIndex:root.rows.findIndex(function(r){return r.id===root.selected.id});onRowClicked:function(index,item){root.selected=item;root.message="";recordWindow.openFor(root.view,item.id)}onRowDoubleClicked:function(index,item){root.selected=item;recordWindow.openFor(root.view,item.id)}}
+                DataTable {objectName:"workflowTable";visible:root.view!=="device";anchors.fill:parent;items:root.rows;columns:root.visibleColumns();selectedIndex:root.rows.findIndex(function(r){return r.id===root.selected.id});onRowClicked:function(index,item){root.selected=item;root.message=""}onRowDoubleClicked:function(index,item){root.selected=item;recordWindow.openFor(root.view,item.id)}}
                 Column {visible:root.view==="device";anchors.fill:parent;anchors.margins:22;spacing:18
                     Text {text:root.asset.code||"";font.pixelSize:18;color:Colors.text}
                     Text {width:parent.width;text:"安装位置："+(root.asset.location||"—")+"\n设备型号："+(root.asset.model||"—");font.pixelSize:Typography.body;color:Colors.textSecondary;wrapMode:Text.Wrap;lineHeight:1.6}

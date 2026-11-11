@@ -54,13 +54,8 @@
     <file>qml/components/ResponsiveRow.qml</file>
     <file>qml/pages/ProductPage.qml</file>
     <file>qml/components/ProductEditor.qml</file>
-    <file>qml/pages/DashboardPage.qml</file>
-    <file>qml/pages/TaskListPage.qml</file>
     <file>qml/pages/InspectionPage.qml</file>
     <file>qml/pages/CameraCapturePage.qml</file>
-    <file>qml/pages/DevicePage.qml</file>
-    <file>qml/pages/DefectPage.qml</file>
-    <file>qml/pages/HistoryPage.qml</file>
     <file>qml/pages/SettingsPage.qml</file>
     <file>qml/pages/AiModelPage.qml</file>
     <file>qml/pages/LoginPage.qml</file>
