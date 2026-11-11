@@ -98,7 +98,8 @@ BODY
     s=before+loop+s[s.index('\nout:'):]
     outfile='fieldops_online_resident.cc' if online else 'fieldops_resident.cc'
     (folder/outfile).write_text(s)
-    shutil.copyfile(ROOT/'resident_protocol.h',folder/'resident_protocol.h')
+    protocol_header = Path(__file__).resolve().parents[2] / 'services/inference/resident_protocol.h'
+    shutil.copyfile(protocol_header, folder/'resident_protocol.h')
     cmake=folder/'CMakeLists.txt';c=cmake.read_text()
     target='${PROJECT_NAME}'+('_online' if online else '')
     resident=target+'_resident'

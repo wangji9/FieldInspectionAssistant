@@ -13,7 +13,7 @@ from answer_policy import constrain, visible_length
 
 
 def load_server_functions(names, namespace):
-    source=Path(__file__).with_name('server.py')
+    source = Path(__file__).resolve().parents[2] / 'services/inference/server.py'
     module=ast.parse(source.read_text(encoding='utf-8'),filename=str(source))
     definitions=[node for node in module.body if isinstance(node,ast.FunctionDef) and node.name in names]
     assert {node.name for node in definitions}==set(names)

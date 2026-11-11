@@ -1,15 +1,23 @@
 """End-to-end SSE check using an existing recording; never opens a microphone."""
+import argparse
 import json
 import time
 import urllib.request
 from pathlib import Path
 
 BASE = 'http://127.0.0.1:1828'
+parser = argparse.ArgumentParser(description=__doc__)
+parser.add_argument('recording', type=Path)
+parser.add_argument('--output', type=Path, required=True)
+args = parser.parse_args()
+recording = args.recording.resolve()
+if not recording.is_file():
+    parser.error(f'recording does not exist: {recording}')
+
 reports = []
 for online in (False, True):
     started = time.monotonic()
-    payload = dict(mode='asr', model='qwen3_asr', online=online,
-                   path='/userdata/ai-workbench/audio/user-voice-test.wav')
+    payload = dict(mode='asr', model='qwen3_asr', online=online, path=str(recording))
     request = urllib.request.Request(BASE+'/api/jobs', data=json.dumps(payload).encode(),
                                      headers={'Content-Type': 'application/json'})
     with urllib.request.urlopen(request, timeout=10) as response:
@@ -32,5 +40,5 @@ for online in (False, True):
                         partial_versions=len(distinct), first_partial_s=distinct[0]['t'],
                         completion_s=frames[-1]['t'], metrics=frames[-1]['metrics'], frames=frames))
     print(json.dumps({k:v for k,v in reports[-1].items() if k!='frames'}, ensure_ascii=False), flush=True)
-Path('/userdata/ai-workbench/voice-chat-asr-stream-verification.json').write_text(
+args.output.write_text(
     json.dumps(reports, ensure_ascii=False, indent=2), encoding='utf-8')

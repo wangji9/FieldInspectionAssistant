@@ -1,77 +1,117 @@
-# FieldInspectionAssistant
+# 现场巡检助手
 
-RK3588 板端 Qt Quick/QML 现场巡检应用。使用带最小化、最大化和关闭按钮的系统标准窗口，不修改 HDMI 分辨率。窗口会按当前屏幕工作区初始化，并记住用户调整后的大小、位置和最大化状态。
+基于 C++17、Qt 6、QML 和 SQLite 的 RK3588 桌面应用。现场采集形成工程证据，分析结果可关联巡检任务与事件，缺陷经过派发、整改和复核后进入报告。
 
-界面采用浅色工作区、深色浮动导航、靛紫色主操作和统一圆角卡片。工作台突出任务与常用入口，智能助手使用分段导航、问题建议、编辑工具栏和流式对话气泡。布局支持窄窗口导航收起、分栏纵向排列、筛选栏换行和内容滚动。页标题 22 px，默认正文与按钮 16 px、表格 14 px、设备名称与状态 16–18 px，数值 28–32 px；Inter/Noto Sans 与 Noto Sans CJK SC 分别承担拉丁文字和中文，代码使用 DejaVu Sans Mono 13 px。Qt 自动处理屏幕缩放。
+## 目录结构
 
-## 工程结构
+| 路径 | 内容 |
+| --- | --- |
+| `src/` | Qt 主程序、业务与设备服务、数据库和原生界面组件 |
+| `qml/`、`resources.qrc` | 界面资源 |
+| `migrations/` | SQLite 数据库迁移脚本 |
+| `services/inference/` | 本地推理 API、模型注册与调度、常驻进程、视频理解工作进程和工程推理套接字服务 |
+| `services/audio/` | 六麦唤醒协议、CH340 串口初始化和默认音频设备配置 |
+| `deploy/inference/` | RKNN SDK 构建补丁、模型导入和语音运行环境安装 |
+| `deploy/vision/` | RK1828 视觉模型转换及 C++ 工作进程构建工具 |
+| `deploy/systemd/`、`deploy/udev/` | 服务定义与串口设备规则 |
+| `tests/` | C++ 回归测试、Python 单元测试、演示工程生成与板端验收脚本 |
+| `docs/`、`third_party/` | 操作与设计文档、第三方依赖及其许可证 |
 
-- `src/app`：应用生命周期、导航和会话
-- `src/services`：摄像头、AI 推理、巡检、资产、缺陷、证据和同步服务
-- `src/models`：任务、设备、缺陷和巡检记录模型
-- `src/database`：SQLite 数据库与迁移入口
-- `qml/components`、`qml/pages`、`qml/theme`：产品化页面骨架和主题资源
-- `migrations`：可审计的数据库迁移脚本
-- `tests`：设备端验证用例
-- `deploy`：板端部署文件
+## 系统与开发环境
 
-## 界面与操作
+| 项目 | 部署基线 |
+| --- | --- |
+| 主板与系统 | RK3588，ARM64，Ubuntu 24.04 LTS，板端已核对 Ubuntu 24.04.4 和厂商内核 6.1.141 |
+| 桌面 | Xfce/X11，应用部署账户 `ztl`，该账户需要 `audio`、`dialout`、`video` 组权限 |
+| 编译工具 | GCC/G++ 支持 C++17，CMake 3.16 起，板端已核对 CMake 3.28.3 |
+| 界面与本地库 | Qt 6.4.2、Qt Quick/QML、Qt Virtual Keyboard、SQLite 插件、OpenCV 4.6、ALSA、FFTW3、XCB |
+| Python | 3.12，系统环境安装 Flask、NumPy、Pillow 和 pyserial，声学分析和本地朗读各用独立虚拟环境 |
+| 硬件与媒体 | RK1828 使用板卡固件配套的 RKNN3 驱动与运行库，摄像头通过 V4L2，音频通过 ALSA/PulseAudio，编解码使用 FFmpeg |
 
-- 常规按钮约 34–40 像素，助手发送与检查按钮 32 像素；按钮、表单、下拉菜单、复选框、列表和表格共用统一色彩、圆角与交互状态。相机保存按钮 34 像素。
-- 智能助手包含“文字问答、图片问答、语音转写”三个紧凑入口，图片处理与检查合并。图片区约占 43%，右侧保留更宽的要求与结果区；模型选择位于开始检查右侧。
-- 智能助手不再使用独占页面标题栏，模式导航直接置顶。“导出、使用、性能、记录”分别位于现场问答、检查要求和语音停止播放按钮右侧，切换视图后仍可返回使用页。文字输入栏为 76 px，语音输入栏为 48 px；语音的自动朗读和录音后转文字与主操作同排，窄窗口优先保留在第一行，示例音频和清空对话收进“更多”。
-- 点击任意可编辑文字框，打开中英屏幕键盘，输入后点击“完成输入”回填；数值框使用数字布局。只读回答不会打开键盘。中文拼音候选由匹配系统 Qt 6.4.2 的源码与字典提供，来源见 `third_party/pinyin/README.md`。
-- 模型问题框与聊天输入框均支持麦克风输入；语音识别使用独立客户端，不覆盖当前回答。麦克风按钮启动录音，说话后停顿自动转文字并回填；也可手动结束录音。输入面板支持导入已有录音和取消。
-- 语音页采用对话气泡：结束录音后默认自动提交 Qwen3-ASR，支持关闭“录音后转文字”；导入音频可手动转写。识别片段实时更新到助手气泡，可自动朗读，也可单独播放、查看文字、停止和重播。录音最长 60 秒，可取消，离开页面会结束录音。
-- 文字问答、图片检查的输出统一使用流式气泡。朗读按句生成并依次播放，生成后的完整语音保留供重播。对话列表保留在当前应用会话中，ASR 结果仍可从“记录”查看。
-- Markdown 回答支持分级标题、嵌套列表、引用、表格、等宽代码块与行内代码，表格和代码回答自动使用更宽的气泡，并提供原文复制。
-- 回答长度按“字”设置，通过提示词限制正文长度。模型的生成安全上限独立设置为 4096 Token，超长时重新生成更精简的完整回答，最多重试两次，不裁切文本；仍不满足时显示错误。语音转写不应用摘要长度限制。
-- 智能助手右上角“导出”打开保存位置与格式选择：Markdown、TXT、HTML、JSON；图片和语音还支持含原图、WAV 与全部对话的 ZIP。语音条提供“保存 WAV”。独立文档的附件放在同级唯一命名的目录中，档案 CSV 同样可自选位置，正确保留中文、逗号、引号与换行。
-- 文字、图片问答默认回答后朗读，可关闭自动朗读；结果气泡提供“朗读文字”，页面提供停止按钮。麦克风转写到输入框时保留编辑步骤，不自动发送或朗读草稿。
-- 本地朗读使用独立 Python 环境中的 sherpa-onnx / AISHELL3 中文 TTS，英文缩写按字母读，明确通过 C-Media USB 声卡以 48 kHz 双声道输出。生成音频检查静音并限制响度，播放器使用独立应用标识与正常流音量，设备输出保持低档（当前 30%）。运行 `board_ai/install_speech.sh` 安装环境；单次朗读最多 3000 字。
-- 模型在后台加载后驻留，选择文字、图片或语音模块时提前准备；已驻留模型直接执行后续请求，“性能”页模型准备耗时为 0。默认文字与 ASR 可同时保留；较大的图片模型按板载内存需要替换闲置模型。
-- 所有速度和耗时指标集中在“性能”页；“使用”页只显示输入及结果。更换图片或切换模块会清除上一结果，历史结果从“记录”页打开。
-- 设备中心采用左侧设备列表、右侧资料/巡检项目。任务、缺陷、档案、拍照和设置页共用紧凑操作样式。
-- 现场拍照是独立的整宽取景页，不含检查内容和结果。底部选择真实采集设备、MJPEG 分辨率、帧率、旋转/镜像、JPG/PNG 及照片质量、保存目录；支持 MP4 无声录像、录像帧率、画质、最长时长、停止保存。旋转和镜像同时作用于预览及保存内容；修改采集格式需先断开相机。
-- “拍照保存”后点击旁边的“用于图片问答”，将最近一张照片带入图片问答的图片区，填写要求后点击“开始检查”。跳转恢复到使用页并清除旧回答，保留用户的问题和模型选择；不自动提交问题。最近保存的照片路径会在重启后恢复，文件已移动或损坏时提示重新拍照。录像未保存完成、模型回答或语音输入期间暂不允许跳转。
-- 点击“打开摄像头”即可实时取景。C++ 独立线程使用 V4L2 MMAP 采集、按视口解码和旋转；Qt 场景图只提交最新纹理。拍照在后台保存完整分辨率，录像在独立线程向原生 FFmpeg 编码器送帧，不再次占用摄像头。离开页面会停止录像、保存并关闭相机。独立照片默认保存在 `~/Pictures/现场巡检/`，目录可修改并记住；巡检业务证据仍通过原有证据服务写入数据库。
-- SQLite 使用 WAL，数据目录为 `QStandardPaths::AppDataLocation`，证据文件进入 `evidence/`。
-- 空库只初始化账户和巡检标准，不再生成演示设备、任务或档案。业务顺序为：设备建档 → 新建任务并安排时间 → 选择任务并点击“开始巡检” → 填写检查项/登记异常缺陷 → 提交归档。列表选择不会自动开始任务；进行中任务优先、待开始任务按计划时间升序、已完成任务最后显示。完成后只读查看，不再创建草稿。
-- 任务、设备、缺陷、档案均提供新增、查询、编辑与删除入口。“开始巡检”位于首行“已完成”右侧。关联设备须先删除对应业务内容；任务删除包含其记录，关联缺陷须先删除。删除任务关联档案会让任务回到进行中，并保留其他设备草稿，避免完成状态与数据不一致。已关闭缺陷不可修改，提交任务前检查必填项与异常登记，缺陷按分派、处理、整改、复核顺序流转。
-- 记录写入同时追加 `audit_logs`，日志写入 `logs/app.log`。
-- 现有同步服务仍需接入正式业务系统，界面调整不等于已完成外部业务集成。
+板端须先装好与 RK1828 配套的系统镜像和运行库。使用 `systemctl status rknn3` 和 `rknn-smi info` 检查设备状态。中文输入法资源来自与系统 Qt 匹配的 [Qt 拼音引擎](third_party/pinyin/README.md)。
 
-## 板端构建
+### 构建桌面程序
 
-### 智能体、声音分析与用户管理
-
-- “语音转写”右侧的“智能体分析”由 Qwen3.5 生成受限工具计划，依次调用数据库统计、已有声音指标、短时实采、图像检查或音频转写，再使用文字模型流式汇总结论。图像调用 Qwen2.5-VL，音频调用 Qwen3-ASR；模型仍通过 1828 驻留推理服务复用。界面显示执行步骤与真实工具观测，不展示隐藏思维链。对话和步骤消息按用户保存在业务 SQLite 中，支持重新打开和导出。
-- “数据分析”包含实时采集、数据分析、趋势分析和数据管理。采集仅展示一组时域 / FFT 双图，选择单通道或六通道叠加；叠加使用同一段交错 PCM，六路时间对齐。时域纵轴默认 ±0.1 FS，可选 ±1 / ±0.01；FFT 默认 −120～0 dB re 1 FS，可选其他固定范围。滚轮放大时间/频率范围，Ctrl+滚轮放大纵轴，支持复位。时域、FFT、Welch、Hilbert 包络/包络谱、STFT、Mel、MFCC、LFCC、LPC、LPCC、瀑布、BFCC、GFCC、MSRCC、PNCC、PSRCC、NGCC、PCA 均来自真实 PCM；PCA 展示实际 MFCC 帧降维，不代表故障识别模型。
-- 实时采集由 C++ 独立线程读取：六麦优先使用串口原始六通道协议，普通声卡使用 ALSA。逐包验证校验和，提取六路真实 PCM 写入多通道 WAV，并进入 6 秒环形缓冲。独立 C++ DSP 线程处理常用谱图和统计指标；界面仅取最新帧，旧显示帧可跳过，原始音频不随显示降采样。所有图表由 C++ QPainter 绘制，QML 仅保留布局与交互。
-- 时域/FFT 等显示最多约 10 帧/秒，STFT/瀑布约 4 帧/秒。倒谱等高级特征仍使用独立 Python/SciPy/spafe 进程，最多约 2 帧/秒、一次只允许一个请求，不阻塞音频读取；不是所有算法都已迁移到 C++。后台页面停止绘图和通道预览刷新。
-- 六麦原始数据源为 `/dev/lg_speech_serial` 控制口和 `/dev/lg_speech_uac` 数据口，16 kHz、6 通道，频率范围至 8 kHz；声卡 UAC 仍是处理后的单通道，可供语音识别使用。六通道完整录音及逐秒指标保留，界面使用共用双图选择或叠加通道。其他传感器后续接入。未经标定使用 FS；输入有效标定系数后才使用 V/Pa。静音无有效特征时显示缺失，不生成假值。
-- “采集窗口”仅控制实时显示（1/2/5 秒）。停止后“分析范围”默认整段录音，也可指定起止秒数或最近采集窗口；完整录音不再被截成最近 30 秒。坐标轴数值最多两位有效数字，时间刻度仅显示整数秒；原始采样和导出数据保留精度。
-- 原始 WAV 和逐秒提取的窗口统计保存在应用数据目录 `measurements/`，索引与趋势位于 `measurements.sqlite`。可以导入真实 WAV、分析历史录音、导出所选分析范围 JSON、全通道 CSV 或图表 PNG。趋势支持原始值、相对首个非零样本变化和移动均值；现有全频带能量覆盖 0–Nyquist。
-- “用户管理”支持真实数据库增删改查、启停和角色权限。启动后需要密码验证；首次使用创建管理员，无固定默认密码。密码为随机盐 PBKDF2-HMAC-SHA256（600000 次），不保存明文，不能通过旧账户选择器绕过验证。禁止删除当前用户或移除最后一个可登录管理员，关联业务账户采用停用。
-- 长录音倒谱按完整时间范围汇总为最多 400 列有效帧均值，STFT / MFB 显示最多 160 列；分析范围和原始 WAV / CSV 不截断。渲染器拒绝无效尺寸并清除旧图，切换高级算法时显示计算状态，防止上一种图残留。统计卡片、采样说明和标题下注释已移除，分析范围位于通道右侧。
-- FFT 横轴固定显示 0–20 kHz。数据仍按真实采样率计算，16 kHz 六麦仅有 0–8 kHz 有效频带，8–20 kHz 灰显为无数据；导入 48 kHz 数据时可显示真实 20 kHz 内的频谱。没有重采样或伪造高频信号。
-- 采集双图隐藏标题，叠加、纵轴范围、放大、复位和标定放在页面首行；释放空间给图表。窄屏上下排列，宽屏左右排列，坐标提示使用悬停浮层。
-- 实时双图复用 FFTW 计划及 Hann 窗，统计指标按约 1 Hz 更新，FFT 只对峰值保留后的显示点转换 dB；完整采样仍参与变换。曲线直接从 C++ 服务进入绘图组件，QML 只读取轻量状态；绘图缓存坐标，并在实时模式使用细像素线减少软件抗锯齿开销，静态分析保留平滑绘制。
-- 新运行环境使用 `deploy/install_analytics.sh`；数据迁移版本为 6，不清空原有业务记录。
-
-### 知识图谱与 Graph RAG
-
-- 智能助手中，“知识图谱”位于“智能体分析”左侧。先在本体页添加实体类型和关系约束，或勾选“允许更新本体”。本体提供表单和 JSON 两种编辑方式，不预置业务实体或虚构关系。
-- 构建页明确提供“LLM 自动抽取三元组”“资料自动抽取”“对话自动抽取”。Qwen3.5 通过驻留模型服务执行本体发现、实体关系抽取、遗漏三元组复核。支持 UTF-8 TXT、Markdown、CSV、JSON、HTML，以及文字型 PDF。每条候选关系需匹配本体、存在真实两端实体、附带能映射回原文的证据；仅允许恢复空白差异，不能用改写句冒充引用。LLM 抽取可能遗漏或误解，应用前可查看候选三元组和证据。
-- 应用候选时，实体按名称和类型合并，关系按主体、谓词、客体合并，来源正文、SHA-256、作者、时间、本体快照和变更项在同一 SQLite 事务中保存。图谱采用圆形节点、中心辐射布局；填充色区分类型，外圈区分新增、更新、已有和检索命中。可拖动、缩放、定位实体、查看原文和历史版本。
-- “版本与来源”支持搜索、新增、重命名、资料正文编辑并重新抽取、删除及恢复。来源删除会撤回仅由该来源支持的当前事实；历史快照仍可查。编辑应用后旧来源撤回，新来源生效。删除版本记录只隐藏档案条目，保持图谱和审计链完整，可恢复；所有元数据操作也生成版本记录。
-- `kg_source_events` 保存来源在各版本的有效性和名称。历史视图只使用当时存在且有效的证据。导出 JSON 包含当前图谱、历史实体关系、全部来源、证据、本体和来源事件，可自选保存路径。
-- 智能体默认启用 Graph RAG。`graph_search` 通过实体名称及中文词片匹配、邻接关系扩展检索原文事实，并将 `[KG1]` 等引用交给文字模型；当前工具结果优先于旧对话。这里是本地图谱检索增强，不依赖向量数据库。界面“工具检查”检查数据库、图谱和设备，图像/音频工具在执行时检查附件与模型。
-
-算法和实现依据：[SciPy 信号处理](https://docs.scipy.org/doc/scipy/tutorial/signal.html)、[spafe](https://spafe.readthedocs.io/)、[ALSA PCM](https://www.alsa-project.org/alsa-doc/alsa-lib/group___p_c_m.html)、[FFTW 线程约束](https://www.fftw.org/fftw3_doc/Thread-safety.html)、[OWASP 密码存储](https://cheatsheetseries.owasp.org/cheatsheets/Password_Storage_Cheat_Sheet.html)。LPC 采用带相对对角稳定项的自相关解；MSRCC/PSRCC 对零能量/零相位作数值边界处理，静音帧单独标记。
+在 ARM64 Ubuntu 上安装开发依赖，然后在应用目录执行 CMake。完整依赖清单也由 [板端安装脚本](deploy/install_board.sh) 维护。
 
 ```bash
-cmake -S /home/ztl/FieldInspectionAssistant -B /home/ztl/FieldInspectionAssistant/build -DCMAKE_BUILD_TYPE=Release
-cmake --build /home/ztl/FieldInspectionAssistant/build -j4
-/home/ztl/FieldInspectionAssistant/deploy/run_field_inspection.sh
+sudo apt-get install build-essential cmake pkg-config \
+  qt6-base-dev qt6-declarative-dev qt6-virtualkeyboard-dev libqt6sql6-sqlite \
+  libopencv-dev libasound2-dev libfftw3-dev libxcb1-dev
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build --parallel 4
 ```
+
+## 板端安装
+
+通过获授权的 GitHub 账户获取源码。部署目录使用 `/home/ztl/FieldInspectionAssistant`。在目标板以 `ztl` 登录 Xfce 后打开终端执行以下命令。安装需要 sudo 权限、可访问的 APT 镜像及 SDK 和 Python 依赖下载源。
+
+```bash
+git clone git@github.com:wangji9/FieldInspectionAssistant.git "$HOME/field-inspection-source"
+mkdir -p "$HOME/FieldInspectionAssistant"
+cp -a "$HOME/field-inspection-source/FieldInspectionAssistant/." "$HOME/FieldInspectionAssistant/"
+cd /home/ztl/FieldInspectionAssistant
+bash deploy/install_board.sh
+python3 deploy/install_desktop_launcher.py
+./deploy/run_field_inspection.sh
+```
+
+更新时在已有的 `field-inspection-source` 执行 `git pull --ff-only`，再复制应用目录并运行安装脚本。安装会编译 Qt 应用和原生推理程序，安装声学与朗读依赖，部署并重启推理服务。请在维护时段更新已运行的设备。首次启动空数据库时，在登录页创建管理员。
+
+| 运行位置 | 用途 |
+| --- | --- |
+| `/home/ztl/FieldInspectionAssistant/build/` | Qt 应用构建产物 |
+| `/userdata/ai-workbench/` | 已安装推理程序、SDK、Python 虚拟环境、推理结果与日志 |
+| `/userdata/models/` | 基础模型、视频模型及可选的模型完整性清单 |
+| `/opt/rk1828-models/` | RK1828 文本与视觉语言模型的部署位置 |
+| `/home/ztl/FieldInspectionAssistant/vision-models/` | 实时视觉模型包。可用 `FIELDOPS_VISION_MODELS` 指向已有目录 |
+| `$XDG_RUNTIME_DIR/miiep/inference.sock` | 工程推理私有套接字 |
+| `QStandardPaths::AppDataLocation` | 应用账户的数据库、工程与现场证据 |
+
+模型权重、现场数据和编译产物分别存放在板端。安装时从授权来源准备权重，按模型清单核对文件名、大小和 SHA-256，再复制到运行目录。RK1828 的 Qwen3.5-4B 和 Qwen2.5-VL-7B prune 目录须能通过 `/userdata/models/` 访问，现有部署通过链接指向 `/opt/rk1828-models/`。Qwen3-ASR-0.6B 和 Qwen3-VL 视频模型使用各自完整目录。具体文件和大小以 [模型注册表](services/inference/server.py) 为准。
+
+实时视觉功能按模型标识读取模型包。每包包括 `stream-runner`、`model/` 下的 RKNN 模型与标签，以及 `lib/librknn3_api.so`。人体姿态、实例分割和面部分析所需的文件由 [视觉模型注册表](src/services/VisionLiveService.cpp) 校验。替换模型时，核对 RK1828 运行库版本、标签顺序和模型输出格式。
+
+板端安装脚本使用以下 SDK 版本。已部署的 SDK 版本不符时，先核对板卡固件和依赖，再更换 SDK。
+
+- [RKNN-LLM](https://github.com/airockchip/rknn-llm) `f7390530443bf84f0394255a449d7cbe81e69d1c`
+- [RKNN3 Model Zoo](https://github.com/airockchip/rknn3-model-zoo) `ca92e7fe1a418b220985455446a986b80d6a899f`
+
+### 六麦与串口
+
+六麦模块的 UAC 与 UART 两根 USB 线均接到主板。规则将 `2208:0001` 绑定为 `/dev/lg_speech_uac`，将接在指定 USB 位置的 CH340（`1a86:7523`）绑定为 `/dev/lg_speech_serial`。当前规则使用 USB `devpath=1.1`。换 USB 位置后，用 `udevadm info --attribute-walk` 核对拓扑并更新 [规则](deploy/udev/xf-speech.rules)。
+
+原始信号分析经串口数据通道采集 16 kHz 六路 PCM。ALSA 的 `L6Microphone` 是处理后的单通道输入，可用于语音识别。串口优先使用系统 CH341 驱动，板卡镜像缺少对应模块时，可通过配套服务初始化为 115200、8N1。
+
+```bash
+bash deploy/install_audio.sh
+# 重新插入 UAC 和 UART 两根 USB 线后检查别名，再初始化桌面音频。
+ls -l /dev/lg_speech_uac /dev/lg_speech_serial
+arecord -l
+systemctl --user start yahboom-audio-defaults.service
+```
+
+## 验证与运维
+
+以下命令从应用目录运行。单元测试和 C++ 回归测试可在板端无外设运行。
+
+```bash
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DFIELDOPS_VOICE_TESTS=ON
+cmake --build build --parallel 4
+ctest --test-dir build --output-on-failure
+PYTHONPATH="$PWD/services/inference:$PWD/services/audio" \
+  python3 -m unittest discover -s tests/inference -v
+```
+
+硬件验收前检查推理服务和模型状态。推理冒烟测试使用服务报告的板端样本，样本和权重均须就绪。
+
+```bash
+systemctl status board-ai.service --no-pager
+systemctl --user status miiep-inference.service --no-pager
+curl -fsS http://127.0.0.1:1828/api/status
+journalctl -u board-ai.service -n 60 --no-pager
+python3 tests/miiep_socket_smoke.py "$XDG_RUNTIME_DIR/miiep/inference.sock"
+python3 tests/inference/smoke_test.py --mode all
+```
+
+在应用内选择「文件 → 打开演示工程」，按 [泵组复检案例](docs/miiep-project.md) 检查工程导入、证据关联、模型分析与报告导出。设备与诊断、事件、缺陷的关系见 [巡检关联规则](docs/inspection-relationships.md)。维护、备份和报告操作见 [现场业务与运维说明](PRODUCT_OPERATIONS.md)。
