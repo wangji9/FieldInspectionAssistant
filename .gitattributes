@@ -1,0 +1,5 @@
+* text=auto eol=lf
+*.dat -text
+*.png -text
+*.jpg -text
+*.ico -text

@@ -1,0 +1,8 @@
+[Unit]
+Description=Yahboom six-mic CH340 fixed-115200 compatibility transport (%i)
+After=systemd-udevd.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /usr/local/libexec/yahboom-audio/ch340_init.py %i
+TimeoutStartSec=15

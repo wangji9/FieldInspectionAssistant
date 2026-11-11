@@ -1,0 +1,12 @@
+[Unit]
+Description=Select ListenGo microphone and C-Media USB speaker
+After=pulseaudio.service
+Wants=pulseaudio.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /usr/local/libexec/yahboom-audio/defaults.py
+TimeoutStartSec=40
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,13 @@
+[Unit]
+Description=MIIEP project inference over a private Unix socket
+
+[Service]
+Type=simple
+RuntimeDirectory=miiep
+RuntimeDirectoryMode=0700
+ExecStart=/usr/bin/python3 %h/FieldInspectionAssistant/deploy/miiep_inference.py --socket %t/miiep/inference.sock --backend rk1828
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=default.target

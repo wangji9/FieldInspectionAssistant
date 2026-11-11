@@ -1,0 +1,5 @@
+# Equivalent device aliases to the Yahboom tutorial, for existing dialout users.
+SUBSYSTEM=="tty", KERNEL=="ttyACM*", ATTRS{idVendor}=="2208", ATTRS{idProduct}=="0001", GROUP="dialout", MODE="0660", SYMLINK+="lg_speech_uac"
+# Pin this board's six-mic CH340 to its current USB socket, avoiding other CH340 devices.
+SUBSYSTEM=="tty", KERNEL=="ttyUSB*", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="7523", ATTRS{devpath}=="1.1", GROUP="dialout", MODE="0660", SYMLINK+="lg_speech_serial"
+ACTION=="add", SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ATTR{devpath}=="1.1", ATTR{idVendor}=="1a86", ATTR{idProduct}=="7523", TAG+="systemd", ENV{SYSTEMD_WANTS}+="yahboom-ch340@%k.service"

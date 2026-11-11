@@ -1,0 +1,15 @@
+[Unit]
+Description=RK3588 and RK1828 local inference service
+After=network.target rknn3.service
+
+[Service]
+Type=simple
+User=ztl
+WorkingDirectory=/userdata/ai-workbench
+ExecStart=/usr/bin/python3 -u /userdata/ai-workbench/server.py
+Restart=on-failure
+RestartSec=3
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target

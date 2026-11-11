@@ -1,0 +1,12 @@
+<RCC>
+  <qresource prefix="/qt-project.org/imports/QtQuick/VirtualKeyboard/Layouts/zh_CN">
+    <file alias="main.qml">layouts/zh_CN/main.qml</file>
+    <file alias="symbols.qml">layouts/zh_CN/symbols.qml</file>
+    <file alias="dialpad.fallback">layouts/zh_CN/dialpad.fallback</file>
+    <file alias="digits.fallback">layouts/zh_CN/digits.fallback</file>
+    <file alias="numbers.fallback">layouts/zh_CN/numbers.fallback</file>
+  </qresource>
+  <qresource prefix="/qt-project.org/imports/QtQuick/VirtualKeyboard/3rdparty/pinyin/data">
+    <file alias="dict_pinyin.dat">engine/data/dict_pinyin.dat</file>
+  </qresource>
+</RCC>

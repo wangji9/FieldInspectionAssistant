@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=现场巡检助手
+Comment=FieldOps RK3588 现场巡检与证据采集
+Exec=/home/ztl/FieldInspectionAssistant/deploy/open_field_inspection.py
+TryExec=/home/ztl/FieldInspectionAssistant/deploy/open_field_inspection.py
+Path=/home/ztl/FieldInspectionAssistant
+Icon=applications-engineering
+Terminal=false
+Categories=Utility;
+StartupNotify=false
+StartupWMClass=field_inspection_assistant
