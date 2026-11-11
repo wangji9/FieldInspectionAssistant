@@ -1,5 +1,6 @@
 #include "qwen3_vl.h"
 #include "image_utils.h"
+#include "vision_input.h"
 #include "../resident_protocol.h"
 
 #include <QElapsedTimer>
@@ -75,6 +76,8 @@ public:
     bool initialize()
     {
         auto &vision = context_.vision;
+        if (canPackDirectly(vision))
+            rgb_.resize(size_t(vision.model_width) * vision.model_height * fieldops::VisionChannels);
         for (size_t layer = 0; layer < logical_.size(); ++layer) {
             const auto *attr = vision.outputs[layer].attr;
             size_t elements = 1;
@@ -103,7 +106,7 @@ public:
         return true;
     }
 
-    bool encodeFrame(const QString &path, size_t index, bool &reused)
+    bool encodeFrame(const QString &path, size_t index, bool &reused, qint64 &preprocessNs)
     {
         QFile file(path);
         QCryptographicHash hash(QCryptographicHash::Sha256);
@@ -124,9 +127,13 @@ public:
             if (read != 0)
                 return false;
             auto &out = entry->features;
-            if (inference_qwen3_vl_vision(&context_.vision, &image, out[0].data(), out[1].data(),
-                                          out[2].data(), out[3].data()) != 0)
+            if (rgb_.empty()) {
+                if (inference_qwen3_vl_vision(&context_.vision, &image, out[0].data(), out[1].data(),
+                                              out[2].data(), out[3].data()) != 0)
+                    return false;
+            } else if (!encodeIntoBuffers(image, out, preprocessNs)) {
                 return false;
+            }
             entry->key = key;
         }
         entry->lastUsed = ++sequence_;
@@ -143,6 +150,57 @@ public:
     rknn3_tensor_mem *aux(size_t layer) const { return aux_[layer - 1]; }
 
 private:
+    static bool canPackDirectly(const rknn_qwen3_vl_vision_context &vision)
+    {
+        if (vision.pruned_version_flag != 1 || vision.io_num.n_input != 1 ||
+            vision.model_width <= 0 || vision.model_height <= 0 ||
+            vision.model_width % fieldops::VisionBlock || vision.model_height % fieldops::VisionBlock)
+            return false;
+
+        const auto *attr = vision.inputs[0].attr;
+        const auto *memory = vision.inputs[0].mem;
+        const auto tokens = size_t(vision.model_width / fieldops::VisionPatch) *
+                            (vision.model_height / fieldops::VisionPatch);
+        return attr && memory && memory->virt_addr && attr->dtype == RKNN3_TENSOR_FLOAT16 &&
+               attr->n_dims == 2 && attr->shape[0] == tokens &&
+               attr->shape[1] == fieldops::VisionTokenElements &&
+               attr->n_stride == 2 && attr->stride[0] == fieldops::VisionTokenElements &&
+               attr->stride[1] == 1 && memory->size >= tokens * fieldops::VisionTokenElements * sizeof(float16);
+    }
+
+    bool encodeIntoBuffers(image_buffer_t &image, std::array<std::vector<float16>, 4> &features,
+                           qint64 &preprocessNs)
+    {
+        auto &vision = context_.vision;
+        auto *input = vision.inputs[0].mem;
+        QElapsedTimer timer;
+        timer.start();
+
+        image_buffer_t resized{};
+        resized.width = vision.model_width;
+        resized.height = vision.model_height;
+        resized.format = IMAGE_FORMAT_RGB888;
+        resized.size = rgb_.size();
+        resized.virt_addr = rgb_.data();
+        if (convert_image(&image, &resized, nullptr, nullptr, 0) < 0)
+            return false;
+        fieldops::packVisionInput(rgb_.data(), resized.width, resized.height,
+                                  static_cast<float16 *>(input->virt_addr));
+        preprocessNs += timer.nsecsElapsed();
+
+        if (rknn3_mem_sync(vision.rknn_ctx, input, RKNN3_MEMORY_SYNC_TO_DEVICE) != RKNN3_SUCCESS ||
+            rknn3_run(vision.rknn_ctx, vision.inputs, vision.io_num.n_input,
+                      vision.outputs, vision.io_num.n_output) != RKNN3_SUCCESS)
+            return false;
+        for (size_t layer = 0; layer < features.size(); ++layer) {
+            auto *output = vision.outputs[layer].mem;
+            if (rknn3_mem_sync(vision.rknn_ctx, output, RKNN3_MEMORY_SYNC_FROM_DEVICE) != RKNN3_SUCCESS)
+                return false;
+            std::memcpy(features[layer].data(), output->virt_addr, output->size);
+        }
+        return true;
+    }
+
     struct CachedFrame {
         QByteArray key;
         std::array<std::vector<float16>, 4> features;
@@ -153,6 +211,7 @@ private:
     std::array<rknn3_tensor_mem *, 3> aux_{};
     std::array<CachedFrame, FrameCount> cache_;
     std::vector<float16> primary_;
+    std::vector<unsigned char> rgb_;
     size_t sequence_ = 0;
 };
 
@@ -169,11 +228,12 @@ int runClip(rknn_app_context_t &context, Callbacks &cb, ClipBuffers &buffers, co
     clock.start();
     QByteArray prompt;
     int reusedFrames = 0;
+    qint64 preprocessNs = 0;
     for (size_t i = 0; i < FrameCount; ++i) {
         if (fieldops_cancelled.load())
             return 0;
         bool reused = false;
-        if (!buffers.encodeFrame(files[int(i)].toString(), i, reused))
+        if (!buffers.encodeFrame(files[int(i)].toString(), i, reused, preprocessNs))
             return -1;
         reusedFrames += reused;
         prompt += QByteArray("帧") + QByteArray::number(i + 1) + "（" +
@@ -213,7 +273,7 @@ int runClip(rknn_app_context_t &context, Callbacks &cb, ClipBuffers &buffers, co
     const auto decoded = cb.tokenizer.Decode(cb.output.data(), cb.output.size());
     const auto result = QJsonDocument(QJsonObject{{"text", QString::fromStdString(decoded)},
         {"vision_ms", double(visionMs)}, {"inference_ms", double(clock.elapsed())},
-        {"reused_frames", reusedFrames}}).toJson(QJsonDocument::Compact);
+        {"preprocess_ms", preprocessNs / 1e6}, {"reused_frames", reusedFrames}}).toJson(QJsonDocument::Compact);
     printf("\n@@VIDEO@@%s\n", result.constData());
     fflush(stdout);
     return 0;
