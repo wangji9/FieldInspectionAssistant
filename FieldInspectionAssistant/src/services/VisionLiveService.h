@@ -3,6 +3,8 @@
 #include <QElapsedTimer>
 #include <QFutureWatcher>
 #include <QImage>
+#include <QThreadPool>
+#include <optional>
 #include <QObject>
 #include <QProcess>
 #include <QTimer>
@@ -54,7 +56,7 @@ public:
     bool overlayVisible() const;
     bool smoothLiveAnnotations() const { return active_ && !oneShot_ && !synchronizedPreview_ && !faceAccess_; }
     QSize resultSize() const { return resultSize_; }
-    QImage maskFrame() const { return overlayVisible() ? maskOverlay_.image() : QImage(); }
+    QImage maskFrame() const { return overlayVisible() ? overlayImage_ : QImage(); }
     Q_INVOKABLE QVariantList annotationRows() const;
 
     Q_INVOKABLE QStringList cameras() const;
@@ -84,6 +86,20 @@ private:
         quint64 generation = 0;
         double preparationMs = 0;
     };
+    struct OverlayCorrection {
+        QByteArray labels;
+        QSize size;
+        QList<SegmentationOverlay::Region> regions;
+        QImage reference;
+        qint64 time;
+        bool follow, resetTargets;
+    };
+    struct OverlaySnapshot {
+        QImage image;
+        QVariantList annotations;
+        quint64 generation;
+        double workerMs;
+    };
     bool start(const QString &model, const QString &camera, const QUrl &file = {}, bool sample = false);
     void cameraFrame(const QImage &frame);
     void sendNext();
@@ -92,6 +108,8 @@ private:
     bool receiveFacePacket(int count, qsizetype bytes, qint64 time, qsizetype &offset);
     void finish(const QString &status);
     void updateResults(bool resetMaskTargets = false);
+    void resetOverlay();
+    void scheduleOverlay();
     void updateAcceleratorStatus(const QByteArray &report);
     bool followsMasks() const { return segmentation_ && sourceKind_ == "camera" && !synchronizedPreview_; }
 
@@ -99,7 +117,9 @@ private:
     SessionManager *session_;
     QProcess worker_;
     QProcess acceleratorMonitor_;
+    QThreadPool preparationPool_, overlayPool_;
     QFutureWatcher<PreparedFrame> preparedFrame_;
+    QFutureWatcher<OverlaySnapshot> overlayWatcher_;
     PreparedFrame readyFrame_;
     QTimer watchdog_;
     QTimer acceleratorTimeout_;
@@ -107,7 +127,14 @@ private:
     QByteArray buffer_, mask_, diagnostics_;
     QStringList labels_;
     QImage latest_, pending_, sent_, displayed_;
-    SegmentationOverlay maskOverlay_;
+    std::shared_ptr<SegmentationOverlay> maskOverlay_ = std::make_shared<SegmentationOverlay>();
+    QImage overlayImage_, overlayPendingFrame_;
+    QVariantList overlayAnnotations_;
+    std::optional<OverlayCorrection> overlayCorrection_;
+    qint64 overlayPendingTime_ = 0;
+    quint64 overlayGeneration_ = 0;
+    bool overlayRunning_ = false, overlayNeedsReset_ = true;
+    double overlayWorkerMs_ = 0;
     QSize inputSize_, resultSize_;
     qint64 latestTime_ = 0, sentTime_ = 0, resultTime_ = 0;
     qint64 latestWallMs_ = 0, sentWallMs_ = 0;

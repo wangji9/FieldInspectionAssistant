@@ -6,7 +6,10 @@
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
 #include <QPointer>
+#include <QThreadPool>
+#include <QHash>
 #include <QVariantList>
+#include <memory>
 
 class CameraService;
 class SessionManager;
@@ -37,6 +40,10 @@ signals:
 
 private:
     struct Sample { QImage image; qint64 wallMs; qint64 elapsedMs; };
+    struct EncodedSamples {
+        quint64 generation = 0;
+        QHash<qint64, QByteArray> images;
+    };
     void onFrame(const QImage &image);
     void submitLatest();
     void receive(QNetworkReply *reply, const QList<Sample> &clip);
@@ -47,7 +54,9 @@ private:
     SessionManager *session_;
     QNetworkAccessManager network_;
     QPointer<QNetworkReply> reply_;
+    QThreadPool encoderPool_;
     QFutureWatcher<QByteArray> encoding_;
+    std::shared_ptr<EncodedSamples> encodedSamples_ = std::make_shared<EncodedSamples>();
     QList<Sample> samples_, pending_;
     QVariantList events_;
     QElapsedTimer clock_;

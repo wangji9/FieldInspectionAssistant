@@ -80,6 +80,22 @@ QByteArray readCounter(const QString &path)
 VisionLiveService::VisionLiveService(CameraService *camera, SessionManager *session, QObject *parent)
     : QObject(parent), camera_(camera), session_(session), status_(tr("选择模型与视频源"))
 {
+    preparationPool_.setMaxThreadCount(1);
+    overlayPool_.setMaxThreadCount(1);
+    connect(&overlayWatcher_, &QFutureWatcher<OverlaySnapshot>::finished, this, [this] {
+        overlayRunning_ = false;
+        auto result = overlayWatcher_.result();
+        if (result.generation == overlayGeneration_) {
+            overlayWorkerMs_ = result.workerMs;
+            const bool changed = overlayImage_.cacheKey() != result.image.cacheKey() ||
+                                 overlayAnnotations_ != result.annotations;
+            overlayImage_ = std::move(result.image);
+            overlayAnnotations_ = std::move(result.annotations);
+            if (changed)
+                emit overlayChanged();
+        }
+        scheduleOverlay();
+    });
     watchdog_.setSingleShot(true);
     acceleratorTimeout_.setSingleShot(true);
     connect(&acceleratorTimeout_, &QTimer::timeout, &acceleratorMonitor_, &QProcess::kill);
@@ -108,7 +124,7 @@ VisionLiveService::VisionLiveService(CameraService *camera, SessionManager *sess
     connect(session_, &SessionManager::sessionEnding, this, [this] {
         stop();
         latest_ = displayed_ = {};
-        maskOverlay_.reset();
+        resetOverlay();
         detected_.clear();
         mask_.clear();
         trend_.clear();
@@ -157,6 +173,7 @@ VisionLiveService::VisionLiveService(CameraService *camera, SessionManager *sess
 VisionLiveService::~VisionLiveService()
 {
     preparedFrame_.disconnect(this);
+    overlayWatcher_.disconnect(this);
     acceleratorTimeout_.stop();
     acceleratorMonitor_.disconnect(this);
     if (acceleratorMonitor_.state() != QProcess::NotRunning) {
@@ -201,7 +218,8 @@ QVariantMap VisionLiveService::summary() const
             {"cameraFps", cameraFps_}, {"inferenceFps", inferenceFps_}, {"inferenceMs", inferenceMs_},
             {"latencyMs", latencyMs_}, {"coverage", coverage_}, {"width", size.width()}, {"height", size.height()},
             {"inputWidth", resultSize_.width()}, {"inputHeight", resultSize_.height()},
-            {"maskTracking", followsMasks()}, {"trackedMasks", followsMasks() ? maskOverlay_.count() : 0}};
+            {"maskTracking", followsMasks()}, {"trackedMasks", followsMasks() ? overlayAnnotations_.size() : 0},
+            {"maskWorkerMs", overlayWorkerMs_}};
 }
 
 QImage VisionLiveService::previewFrame() const
@@ -214,14 +232,14 @@ QImage VisionLiveService::previewFrame() const
 bool VisionLiveService::overlayVisible() const
 {
     if (followsMasks())
-        return !maskOverlay_.image().isNull();
+        return !overlayImage_.isNull();
     return !displayed_.isNull() && (synchronizedPreview_ || latest_.isNull()
         || (latest_.size() == displayed_.size() && latestTime_ - resultTime_ <= MaxOverlayAgeMs));
 }
 
 QVariantList VisionLiveService::annotationRows() const
 {
-    return followsMasks() ? maskOverlay_.annotations() : rows_;
+    return followsMasks() ? overlayAnnotations_ : rows_;
 }
 
 void VisionLiveService::setSynchronizedPreview(bool enabled)
@@ -419,7 +437,7 @@ bool VisionLiveService::start(const QString &model, const QString &device, const
     }
     pending_ = image;
     latest_ = sent_ = displayed_ = {};
-    maskOverlay_.reset();
+    resetOverlay();
     inputSize_ = resultSize_ = QSize();
     latestTime_ = sentTime_ = resultTime_ = 0;
     mask_.clear();
@@ -506,7 +524,11 @@ void VisionLiveService::cameraFrame(const QImage &frame)
     latest_ = frame;
     latestTime_ = streamClock_.elapsed();
     latestWallMs_ = camera_->frameCapturedMs();
-    const bool maskChanged = segmentation_ && maskOverlay_.advance(frame, latestTime_);
+    if (segmentation_) {
+        overlayPendingFrame_ = frame;
+        overlayPendingTime_ = latestTime_;
+        scheduleOverlay();
+    }
     ++cameraCount_;
     if (!pending_.isNull())
         ++skipped_;
@@ -516,8 +538,40 @@ void VisionLiveService::cameraFrame(const QImage &frame)
         emit previewChanged();
     if (!hadPreview)
         emit changed();
-    if (maskChanged || previousOverlay != overlayVisible())
+    if (previousOverlay != overlayVisible())
         emit overlayChanged();
+}
+
+void VisionLiveService::resetOverlay()
+{
+    ++overlayGeneration_;
+    overlayNeedsReset_ = true;
+    overlayPendingFrame_ = overlayImage_ = {};
+    overlayAnnotations_.clear();
+    overlayCorrection_.reset();
+    overlayWorkerMs_ = 0;
+}
+
+void VisionLiveService::scheduleOverlay()
+{
+    if (overlayRunning_ || (overlayPendingFrame_.isNull() && !overlayCorrection_))
+        return;
+    overlayRunning_ = true;
+    overlayWatcher_.setFuture(QtConcurrent::run(&overlayPool_,
+        [overlay = maskOverlay_, generation = overlayGeneration_, reset = std::exchange(overlayNeedsReset_, false),
+         frame = std::exchange(overlayPendingFrame_, QImage()), time = overlayPendingTime_,
+         correction = std::exchange(overlayCorrection_, std::nullopt)] {
+            QElapsedTimer timer;
+            timer.start();
+            if (reset)
+                overlay->reset();
+            if (!frame.isNull())
+                overlay->advance(frame, time);
+            if (correction)
+                overlay->correct(correction->labels, correction->size, correction->regions, correction->time,
+                                 correction->follow, correction->resetTargets, correction->reference);
+            return OverlaySnapshot{overlay->image(), overlay->annotations(), generation, timer.nsecsElapsed() / 1e6};
+        }));
 }
 
 void VisionLiveService::sendNext()
@@ -546,7 +600,7 @@ void VisionLiveService::sendNext()
     preparingFrame_ = true;
     // Prepare one latest frame while the coprocessor is still working.
     // Neither the preview nor the worker waits behind a growing queue.
-    preparedFrame_.setFuture(QtConcurrent::run([frame = std::exchange(pending_, QImage()),
+    preparedFrame_.setFuture(QtConcurrent::run(&preparationPool_, [frame = std::exchange(pending_, QImage()),
                                                  capturedAt = latestTime_, wallMs = latestWallMs_, generation = generation_] {
         QElapsedTimer cost;
         cost.start();
@@ -855,6 +909,8 @@ void VisionLiveService::updateResults(bool resetMaskTargets)
                 pixels += visibleLabels[label];
             coverage_ = 100.0 * pixels / mask_.size();
         }
-        maskOverlay_.correct(mask_, resultSize_, regions, resultTime_, follow, resetMaskTargets);
+        const bool reset = resetMaskTargets || (overlayCorrection_ && overlayCorrection_->resetTargets);
+        overlayCorrection_ = OverlayCorrection{mask_, resultSize_, std::move(regions), displayed_, resultTime_, follow, reset};
+        scheduleOverlay();
     }
 }

@@ -17,7 +17,7 @@ public:
     void reset();
     bool advance(const QImage &frame, qint64 capturedAt);
     void correct(const QByteArray &labels, const QSize &size, const QList<Region> &regions,
-                 qint64 capturedAt, bool follow, bool resetTargets = false);
+                 qint64 capturedAt, bool follow, bool resetTargets = false, const QImage &referenceImage = {});
     QImage image() const;
     int count() const;
     QVariantList annotations() const;

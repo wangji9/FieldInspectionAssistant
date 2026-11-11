@@ -11,6 +11,7 @@ class AiInferenceService final : public QObject {
     Q_OBJECT
 public:
     void setSession(SessionManager*s){session_=s;}
+    void setRealtimeAudio(bool enabled){realtimeAudio_=enabled;}
     explicit AiInferenceService(QObject *parent = nullptr);
 
     Q_PROPERTY(bool available READ available NOTIFY statusChanged)
@@ -45,6 +46,7 @@ public:
     Q_INVOKABLE void clearSession();
     Q_INVOKABLE void refreshStatus();
     Q_INVOKABLE void prepareModel(const QString &model, bool online = false);
+    void prepareStartup();
     Q_INVOKABLE void refreshResults();
     Q_INVOKABLE void showResult(const QVariantMap &result);
     Q_INVOKABLE void selectMode(const QString &mode);
@@ -59,6 +61,7 @@ signals:
     void completed(bool ok, const QString &mode);
     void preferencesChanged();
 private:
+    void requestPrepare(const QJsonObject &options);
     void startStream();
     void consumeStream();
     void applyJob(const QJsonObject &obj);
@@ -76,6 +79,7 @@ private:
     QNetworkAccessManager manager_;
     QTimer poll_, statusTimer_;
     bool available_ = false, busy_ = false, polling_ = false;
+    bool realtimeAudio_ = false;
     QString jobId_, mode_, answer_, message_ = QStringLiteral("等待推理");
     QVariantMap metrics_, system_;
     QVariantList results_;

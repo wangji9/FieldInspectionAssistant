@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import queue
+import shutil
 import signal
 import re
 import subprocess
@@ -14,10 +15,12 @@ import tempfile
 import uuid
 import wave
 from asr_stream import AsrTranscriptStream
+from inference_queue import InferenceQueue
 from resident_models import ResidentPool
 import codecs
 import atexit
 from contextlib import contextmanager
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as WorkTimeout
 from pathlib import Path
 from flask import Flask, jsonify, request, Response, stream_with_context
 
@@ -30,11 +33,12 @@ VIDEO_MODELS={
     'qwen3_video':('2B','66560', (5408088,240046080,65267648,1079662592,5934249,622329856)),
     'qwen3_video_4b':('4B','34816', (5411672,244912128,57719160,2432394240,5934249,777912320)),
 }
-VIDEO_IDLE_SECONDS=10
+VIDEO_IDLE_SECONDS=45
 DATA=ROOT/'data'; DATA.mkdir(exist_ok=True)
 app=Flask(__name__); app.config['MAX_CONTENT_LENGTH']=32*1024*1024
 lock=threading.Lock(); jobs={}; worker=None; rk_worker=None; asr_worker=None; events=queue.Queue()
-submissions=queue.Queue(maxsize=8)
+submissions=InferenceQueue()
+audio_preparation=ThreadPoolExecutor(max_workers=2,thread_name_prefix='audio-prepare')
 submission_lock=threading.Lock()
 QUEUE_TIMEOUT_SECONDS=120
 vision_reservation={'token':'','until':0.0}
@@ -114,7 +118,9 @@ def system_status():
     npu=''
     try: npu=Path('/sys/kernel/debug/rknpu/load').read_text().strip()
     except OSError: pass
-    return dict(**resident_pool.status(),models=rows,service='online',busy=lock.locked(),queued=submissions.qsize(),temperature_c=max(temps) if temps else None,
+    waiting,preloads=submissions.status()
+    return dict(**resident_pool.status(),models=rows,service='online',busy=lock.locked() or vision_reserved(),queued=waiting,
+        pending_preloads=preloads,temperature_c=max(temps) if temps else None,
         memory_available_mb=round(mem['MemAvailable']/1024),memory_total_mb=round(mem['MemTotal']/1024),
         disk_free_gb=round(disk.f_bavail*disk.f_frsize/1024**3,2),npu_load=npu,hardware='RK3588 + RK1828',
         sample_image=str(ROOT/'vendor/rknn-llm/examples/multimodal_model_demo/data/demo.jpg'),
@@ -242,20 +248,43 @@ def checked_path(value,exts):
     if not path.is_file() or path.suffix.lower() not in exts: raise ValueError('请选择有效的图片或音频文件')
     return path
 
-def asr(payload,job):
-    global asr_worker
+def prepare_audio(payload,job_id):
     source=checked_path(payload.get('path',''),{'.wav','.mp3','.m4a','.flac','.ogg','.webm','.aac'})
-    audio=DATA/(job['id']+'.wav')
-    subprocess.run(['ffmpeg','-nostdin','-y','-i',str(source),'-ar','16000','-ac','1','-c:a','pcm_s16le',str(audio)],
-        check=True,stdout=subprocess.DEVNULL,stderr=subprocess.PIPE,timeout=60)
-    from speech_audio import normalize_asr
-    levels=normalize_asr(audio)
-    with wave.open(str(audio)) as f: duration=f.getnframes()/f.getframerate()
-    p=MODELS/'Qwen3-ASR-0.6B'; online=bool(payload.get('online',False)); suffix='_online' if online else ''
-    limit=60 if online else 1200
-    if duration<=0 or duration>limit:
+    audio=DATA/(job_id+'.wav')
+    started=time.monotonic()
+    limit=60 if payload.get('online') else 1200
+    try:
+        passthrough=False
+        if source.suffix.lower()=='.wav':
+            try:
+                with wave.open(str(source)) as sample:
+                    passthrough=(sample.getframerate(),sample.getnchannels(),sample.getsampwidth(),sample.getcomptype())==(16000,1,2,'NONE')
+                    if passthrough and not 0<sample.getnframes()/16000<=limit:
+                        raise ValueError(f'当前模式音频长度必须在 0 到 {limit} 秒之间')
+            except (wave.Error,EOFError):
+                pass
+        if passthrough:
+            shutil.copyfile(source,audio)
+        else:
+            subprocess.run(['ffmpeg','-nostdin','-y','-i',str(source),'-t',str(limit+1),'-ar','16000','-ac','1','-c:a','pcm_s16le',str(audio)],
+                check=True,stdout=subprocess.DEVNULL,stderr=subprocess.PIPE,timeout=60)
+        with wave.open(str(audio)) as sample:
+            duration=sample.getnframes()/sample.getframerate()
+        if not 0<duration<=limit:
+            raise ValueError(f'当前模式音频长度必须在 0 到 {limit} 秒之间')
+        from speech_audio import normalize_asr
+        levels=normalize_asr(audio)
+        return audio,levels,duration,passthrough,(time.monotonic()-started)*1000
+    except Exception:
         audio.unlink(missing_ok=True)
-        raise ValueError(f'当前模式音频长度必须在 0 到 {limit} 秒之间')
+        raise
+
+
+def asr(payload,job,preparation):
+    global asr_worker
+    audio,levels,duration,passthrough,prepare_ms=preparation.result()
+    p=MODELS/'Qwen3-ASR-0.6B'; online=bool(payload.get('online',False)); suffix='_online' if online else ''
+    publish(job,metrics=dict(job['metrics'],audio_prepare_ms=prepare_ms,audio_pcm_passthrough=passthrough))
     publish(job,message='正在准备语音识别模型')
     started=time.monotonic()
     try:
@@ -309,11 +338,11 @@ def asr(payload,job):
         result['preload_wait_ms']=result.get('preload_wait_ms',0)+job['metrics'].get('preload_wait_ms',0)
         metrics.update({k:v for k,v in result.items() if k!='cancelled'})
         metrics['e2e_rtf']=metrics['total_ms']/1000/duration
-        job['metrics']=metrics
+        job['metrics']=dict(job['metrics'],**metrics)
     finally:
         audio.unlink(missing_ok=True)
 
-def execute(job,payload):
+def execute(job,payload,preparation=None):
     final=dict(state='done',message='推理完成')
     profile_acquired=False
     try:
@@ -331,7 +360,7 @@ def execute(job,payload):
         if selected=='qwen3vl': required.append('qwen3_encoder')
         if any(not row['ready'] for row in status['models'] if row['model'] in required):
             raise RuntimeError('模型文件仍在传输或不完整，请稍后重试')
-        if mode=='asr': asr(payload,job)
+        if mode=='asr': asr(payload,job,preparation)
         else:
             if mode in ('vision','encoder'): payload['path']=str(checked_path(payload.get('path',''),{'.jpg','.jpeg','.png','.bmp','.webp'}))
             if mode=='text' and not payload.get('question','').strip(): raise ValueError('请输入问题')
@@ -371,53 +400,109 @@ def submit(payload,temporary_input=None):
     if payload['mode']=='asr':payload['answer_limit']=0
     if payload['answer_limit']:payload['max_tokens']=4096
     payload['thinking']=False
-    job=dict(id=uuid.uuid4().hex,state='queued',text='',metrics={},message='等待推理',mode=payload['mode'],model=model,
+    is_audio=payload['mode']=='asr'
+    job=dict(id=uuid.uuid4().hex,state='queued',text='',metrics={},message='正在准备音频' if is_audio else '等待推理',mode=payload['mode'],model=model,
         online=bool(payload.get('online',False)),thinking=bool(payload.get('thinking',False)),
         question=payload.get('question',''),input_path=payload.get('path',''),answer_limit=payload.get('answer_limit',0),max_tokens=payload.get('max_tokens',256),created_at=time.time())
     with submission_lock:
-        if submissions.full():
-            return None,('推理队列已满，请稍后重试',409)
         finished=[key for key,item in jobs.items() if item['state'] in ('done','error','cancelled')]
         for key in finished[:max(0,len(jobs)-99)]:
             jobs.pop(key,None)
         jobs[job['id']]=job
-        submissions.put_nowait((job,payload,temporary_input))
+        prepare=(lambda:audio_preparation.submit(prepare_audio,payload,job['id'])) if is_audio else None
+        if not submissions.add_job(job,payload,temporary_input,prepare):
+            jobs.pop(job['id'],None)
+            return None,('推理队列已满，请稍后重试',409)
     return job,None
 
 
+def preload_ready(model):
+    if model in VIDEO_MODELS:
+        _,files=video_model_files(model)
+        return (VIDEO_RUNTIME/'video-worker').is_file() and all(file_info(path,size)[0] for path,size in files)
+    key='qwen3_asr' if model=='qwen3_asr_online' else model
+    return any(row['model']==key and row['ready'] for row in system_status()['models'])
+
+
+def startup_preloads():
+    if os.environ.get('FIELDOPS_STARTUP_PRELOAD','1')!='0':
+        for model in ('qwen35','qwen3_asr'):
+            submissions.add_preload(model)
+
+
 def run_submissions():
+    last_idle_check=0.0
     while True:
-        job,payload,temporary_input=submissions.get()
-        try:
-            while job['state']=='queued':
-                if time.time()-job['created_at']>=QUEUE_TIMEOUT_SECONDS:
-                    with updates:
-                        if job['state']=='queued':
-                            publish(job,state='error',error='等待推理资源超时',message='等待推理资源超时',
-                                    finished_at=time.time())
-                    break
-                if not lock.acquire(timeout=.2):
-                    continue
-                if vision_reserved():
-                    lock.release()
-                    time.sleep(.2)
-                    continue
-                with updates:
-                    if job['state']!='queued':
-                        lock.release()
-                        break
-                    publish(job,state='running')
-                execute(job,payload)
-                break
-        except Exception:
-            LOG.exception('Could not finish inference job %s',job['id'])
-        finally:
-            if temporary_input:
+        available=submissions.wait(.25)
+        now=time.monotonic()
+        for stale in submissions.discard_stale_jobs(QUEUE_TIMEOUT_SECONDS):
+            job,_,temporary=stale.payload
+            with updates:
+                if job['state']=='queued':
+                    publish(job,state='error',error='等待推理资源超时',message='等待推理资源超时',finished_at=time.time())
+            if temporary:
                 try:
-                    temporary_input.unlink(missing_ok=True)
+                    temporary.unlink(missing_ok=True)
                 except OSError:
                     LOG.warning('Could not remove the temporary image for %s',job['id'])
-            submissions.task_done()
+            if stale.preparation and not stale.preparation.cancel():
+                def discard_audio(future):
+                    if not future.cancelled() and future.exception() is None:
+                        future.result()[0].unlink(missing_ok=True)
+                stale.preparation.add_done_callback(discard_audio)
+        if not available and now-last_idle_check<2:
+            continue
+        if vision_reserved() or not lock.acquire(timeout=.15):
+            time.sleep(.05)
+            continue
+        owns_lock=True
+        try:
+            if vision_reserved():
+                continue
+            work=submissions.pop()
+            if work is None:
+                last_idle_check=now
+                if resident_pool.release_idle(VIDEO_MODELS,VIDEO_IDLE_SECONDS):
+                    startup_preloads()
+                continue
+            if work.kind=='preload':
+                model,evict=work.payload
+                if (model not in VIDEO_MODELS or now-work.created<8) and preload_ready(model):
+                    resident_pool.preload(model,allow_eviction=evict)
+                continue
+            if work.kind=='video':
+                result,payload=work.payload
+                try:
+                    result.set_result(infer_video(*payload,(time.monotonic()-work.created)*1000))
+                except Exception as error:
+                    result.set_exception(error)
+                continue
+            job,payload,temporary_input=work.payload
+            try:
+                with updates:
+                    if job['state']!='queued':
+                        continue
+                    queue_ms=(time.monotonic()-work.created)*1000
+                    if queue_ms>=QUEUE_TIMEOUT_SECONDS*1000:
+                        publish(job,state='error',error='等待推理资源超时',message='等待推理资源超时',
+                                finished_at=time.time())
+                        continue
+                    publish(job,state='running',metrics=dict(job['metrics'],queue_wait_ms=queue_ms))
+                owns_lock=False  # execute releases the accelerator on every exit path.
+                execute(job,payload,work.preparation)
+            finally:
+                if work.preparation and work.preparation.exception() is None:
+                    work.preparation.result()[0].unlink(missing_ok=True)
+                if temporary_input:
+                    try:
+                        temporary_input.unlink(missing_ok=True)
+                    except OSError:
+                        LOG.warning('Could not remove the temporary image for %s',job['id'])
+        except Exception:
+            LOG.exception('Scheduled inference operation failed')
+        finally:
+            if owns_lock:
+                lock.release()
 
 @app.get('/health')
 @app.get('/api/status')
@@ -426,15 +511,19 @@ def status(): return jsonify(system_status())
 @app.post('/api/models/prepare')
 def prepare_model():
     payload=request.get_json(silent=True) or {}
+    if not isinstance(payload,dict):
+        return jsonify(error='请求无效'),400
+    if payload.get('profile')=='desktop':
+        startup_preloads()
+        return jsonify(resident_pool.status()),202
     model=payload.get('model','')
-    if model not in ('qwen35','qwen25vl','qwen3_asr'):
+    if model not in ('qwen35','qwen25vl','qwen3_asr',*VIDEO_MODELS):
         return jsonify(resident_pool.status())
     key=model+('_online' if model=='qwen3_asr' and payload.get('online') else '')
-    if lock.acquire(False):
-        try:
-            if not vision_reserved():
-                resident_pool.prepare(key,also_asr=key=='qwen35' and payload.get('also_asr') is True)
-        finally:lock.release()
+    # Only an explicitly started video session may replace existing residents in advance.
+    submissions.add_preload(key,allow_eviction=key in VIDEO_MODELS)
+    if key=='qwen35' and payload.get('also_asr') is True:
+        submissions.add_preload('qwen3_asr')
     return jsonify(resident_pool.status()),202
 
 
@@ -449,13 +538,16 @@ def reserve_vision():
             if vision_reserved() or not profile_lock.acquire(timeout=35):
                 return jsonify(error='RK1828 正在处理其他任务'),409
             try:
-                resident_pool.close(cancel_prepares=True)
+                submissions.cancel_preloads()
+                resident_pool.close()
                 vision_reservation.update(token=uuid.uuid4().hex,until=time.monotonic()+30)
             finally:profile_lock.release()
         elif action in ('renew','release'):
             if not vision_reserved() or payload.get('token')!=vision_reservation['token']:
                 return jsonify(error='人脸识别的计算资源已释放'),409
             vision_reservation['until']=time.monotonic()+30 if action=='renew' else 0.0
+            if action=='release':
+                startup_preloads()
         else:
             return jsonify(error='未知资源操作'),400
         return jsonify(token=vision_reservation['token'] if action!='release' else '')
@@ -479,12 +571,28 @@ def video_clip():
         return jsonify(error='视频采样帧损坏'),400
     model=payload.get('model','qwen3_video')
     if not isinstance(model,str) or model not in VIDEO_MODELS: return jsonify(error='未知视频模型'),400
-    _, files=video_model_files(model)
-    if not (VIDEO_RUNTIME/'video-worker').is_file() or any(not file_info(path,size)[0] for path,size in files):
+    if not preload_ready(model):
         return jsonify(error='RK1828 视频理解模型尚未安装完整'),503
-    if not lock.acquire(False): return jsonify(error='RK1828 正在处理其他任务'),409
+    if vision_reserved():
+        return jsonify(error='RK1828 正在进行人脸识别'),409
+    result=submissions.add_video((model,images,offsets))
+    if result is None:
+        return jsonify(error='已有视频片段等待处理'),409
     try:
-        if vision_reserved(): return jsonify(error='RK1828 正在进行人脸识别'),409
+        try:
+            body,status=result.result(timeout=3)
+        except WorkTimeout:
+            if result.cancel():
+                return jsonify(error='当前片段已过期，等待下一段画面'),409
+            body,status=result.result(timeout=65)
+        return jsonify(body),status
+    except Exception:
+        LOG.exception('Video clip inference failed')
+        return jsonify(error='RK1828 视频推理失败，请检查模型服务日志'),500
+
+
+def infer_video(model,images,offsets,queue_wait_ms):
+    try:
         with performance_profile(), tempfile.TemporaryDirectory(prefix='fieldops-video-') as temp:
             files=[]
             for i, image in enumerate(images):
@@ -496,17 +604,15 @@ def video_clip():
         match=re.fullmatch(r'\s*(0|([1-3])\s*[-–—]\s*([1-3]))\s*[|｜]\s*(.{1,160})\s*',text)
         if not match or (match[2] and int(match[2])>int(match[3])):
             LOG.warning('Unexpected video response: %r',text)
-            return jsonify(error='模型未返回可定位的事件格式'),422
+            return dict(error='模型未返回可定位的事件格式'),422
         description=match[4].strip()
         static_description=re.search(r'(?:无|没有|未见|未发现|未观察到|未有|并无)(?:任何|明显的?|显著的?)?(?:动作变化|动作|活动|改变|变化|移动)[。！!\s]*$',description)
         event=match[2] is not None and not static_description
-        return jsonify(event=event,text=description,first=int(match[2]) if event else 1,
-                       last=int(match[3]) if event else 3,**result,**stats)
+        return dict(event=event,text=description,first=int(match[2]) if event else 1,
+                    last=int(match[3]) if event else 3,queue_wait_ms=queue_wait_ms,**result,**stats),200
     except Exception:
         LOG.exception('Video clip inference failed')
-        return jsonify(error='RK1828 视频推理失败，请检查模型服务日志'),500
-    finally:
-        lock.release()
+        return dict(error='RK1828 视频推理失败，请检查模型服务日志'),500
 
 
 @app.post('/api/jobs')
@@ -583,17 +689,8 @@ def legacy_vision():
     finally:
         if 'image' in locals() and not locals().get('job'): image.unlink(missing_ok=True)
 
-def release_idle_video():
-    while True:
-        time.sleep(2)
-        try:
-            resident_pool.release_idle(VIDEO_MODELS, VIDEO_IDLE_SECONDS)
-        except Exception:
-            LOG.exception('Could not release the idle video model')
-
-
 if __name__=='__main__':
     logging.basicConfig(level=logging.INFO)
+    startup_preloads()
     threading.Thread(target=run_submissions,daemon=True).start()
-    threading.Thread(target=release_idle_video, daemon=True).start()
     app.run(host='127.0.0.1',port=1828,threaded=True)

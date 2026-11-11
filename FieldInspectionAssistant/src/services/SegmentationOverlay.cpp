@@ -399,7 +399,7 @@ bool SegmentationOverlay::advance(const QImage &frame, qint64 capturedAt)
 }
 
 void SegmentationOverlay::correct(const QByteArray &labels, const QSize &size, const QList<Region> &regions,
-                                  qint64 capturedAt, bool follow, bool resetTargets)
+                                  qint64 capturedAt, bool follow, bool resetTargets, const QImage &referenceImage)
 {
     auto &s = *state_;
     if (resetTargets || !follow || !s.following || s.modelSize != size) {
@@ -412,11 +412,24 @@ void SegmentationOverlay::correct(const QByteArray &labels, const QSize &size, c
         s.image = render(size, extract(labels, size, regions, {}, capturedAt));
         return;
     }
-    const auto reference = std::find_if(s.frames.cbegin(), s.frames.cend(),
-        [capturedAt](const CameraFrame &frame) { return frame.time == capturedAt; });
-    if (reference == s.frames.cend())
+    if (s.frames.empty() && !referenceImage.isNull())
+        advance(referenceImage, capturedAt);
+    if (s.frames.empty())
         return;
+    const auto found = std::find_if(s.frames.cbegin(), s.frames.cend(),
+        [capturedAt](const CameraFrame &frame) { return frame.time == capturedAt; });
     const auto &latest = s.frames.back();
+    CameraFrame fallback;
+    const CameraFrame *reference = nullptr;
+    if (found != s.frames.cend()) {
+        reference = &*found;
+    } else if (referenceImage.size() == s.cameraSize && capturedAt <= latest.time &&
+               latest.time - capturedAt <= MaxPredictionAge) {
+        fallback = {trackingImage(referenceImage), capturedAt, {}};
+        reference = &fallback;
+    } else {
+        return;
+    }
     QList<Region> candidates;
     for (const auto &region : regions) {
         if (region.confirmed || std::any_of(s.targets.cbegin(), s.targets.cend(), [&](const Target &target) {

@@ -3,9 +3,11 @@
 #include "../resident_protocol.h"
 
 #include <QElapsedTimer>
+#include <QCryptographicHash>
 #include <QFile>
 #include <QJsonArray>
 #include <array>
+#include <algorithm>
 #include <cstring>
 #include <memory>
 #include <vector>
@@ -60,7 +62,101 @@ int receive(void *data, RKLLMResult *result, LLMCallState state)
     return 0;
 }
 
-int runClip(rknn_app_context_t &context, Callbacks &cb, const QJsonObject &request)
+class ClipBuffers {
+public:
+    explicit ClipBuffers(rknn_app_context_t &context) : context_(context) {}
+    ~ClipBuffers()
+    {
+        for (auto *mem : aux_)
+            if (mem)
+                rknn3_destroy_mem(context_.llm.rknn_ctx, mem);
+    }
+
+    bool initialize()
+    {
+        auto &vision = context_.vision;
+        for (size_t layer = 0; layer < logical_.size(); ++layer) {
+            const auto *attr = vision.outputs[layer].attr;
+            size_t elements = 1;
+            for (size_t axis = 0; axis < attr->n_dims; ++axis)
+                elements *= attr->shape[axis];
+            logical_[layer] = elements * sizeof(float16);
+            aligned_[layer] = vision.outputs[layer].mem->size;
+            if (!elements || aligned_[layer] < logical_[layer] || aligned_[layer] % sizeof(float16))
+                return false;
+            for (auto &entry : cache_)
+                entry.features[layer].resize(aligned_[layer] / sizeof(float16));
+            const auto bytes = (FrameCount - 1) * logical_[layer] + aligned_[layer];
+            if (layer == 0) {
+                primary_.resize(bytes / sizeof(float16));
+            } else {
+                rknn3_tensor_attr input{};
+                input.index = uint32_t(layer + 1);
+                if (rknn3_query(context_.llm.rknn_ctx, RKNN3_QUERY_INPUT_ATTR, &input, sizeof(input)) != 0)
+                    return false;
+                auto *&mem = aux_[layer - 1];
+                mem = rknn3_create_mem(context_.llm.rknn_ctx, bytes, input.core_id, RKNN3_FLAG_MEMORY_CACHEABLE);
+                if (!mem || !mem->virt_addr || mem->size < bytes)
+                    return false;
+            }
+        }
+        return true;
+    }
+
+    bool encodeFrame(const QString &path, size_t index, bool &reused)
+    {
+        QFile file(path);
+        QCryptographicHash hash(QCryptographicHash::Sha256);
+        if (!file.open(QIODevice::ReadOnly) || !hash.addData(&file))
+            return false;
+        const auto key = hash.result();
+        file.close();
+        auto entry = std::find_if(cache_.begin(), cache_.end(), [&](const auto &slot) { return slot.key == key; });
+        reused = entry != cache_.end();
+        if (!reused) {
+            entry = std::min_element(cache_.begin(), cache_.end(),
+                [](const auto &a, const auto &b) { return a.lastUsed < b.lastUsed; });
+            entry->key.clear();
+            image_buffer_t image{};
+            const auto filename = QFile::encodeName(path);
+            const auto read = read_image(filename.constData(), &image);
+            std::unique_ptr<void, decltype(&free)> pixels(image.virt_addr, free);
+            if (read != 0)
+                return false;
+            auto &out = entry->features;
+            if (inference_qwen3_vl_vision(&context_.vision, &image, out[0].data(), out[1].data(),
+                                          out[2].data(), out[3].data()) != 0)
+                return false;
+            entry->key = key;
+        }
+        entry->lastUsed = ++sequence_;
+        for (size_t layer = 0; layer < logical_.size(); ++layer) {
+            auto *destination = layer == 0 ? reinterpret_cast<uchar *>(primary_.data())
+                                          : static_cast<uchar *>(aux_[layer - 1]->virt_addr);
+            const size_t bytes = index + 1 == FrameCount ? aligned_[layer] : logical_[layer];
+            std::memcpy(destination + index * logical_[layer], entry->features[layer].data(), bytes);
+        }
+        return true;
+    }
+
+    float16 *primary() { return primary_.data(); }
+    rknn3_tensor_mem *aux(size_t layer) const { return aux_[layer - 1]; }
+
+private:
+    struct CachedFrame {
+        QByteArray key;
+        std::array<std::vector<float16>, 4> features;
+        size_t lastUsed = 0;
+    };
+    rknn_app_context_t &context_;
+    std::array<size_t, 4> logical_{}, aligned_{};
+    std::array<rknn3_tensor_mem *, 3> aux_{};
+    std::array<CachedFrame, FrameCount> cache_;
+    std::vector<float16> primary_;
+    size_t sequence_ = 0;
+};
+
+int runClip(rknn_app_context_t &context, Callbacks &cb, ClipBuffers &buffers, const QJsonObject &request)
 {
     const auto files = request["frames"].toArray();
     const auto offsets = request["offsets"].toArray();
@@ -69,40 +165,17 @@ int runClip(rknn_app_context_t &context, Callbacks &cb, const QJsonObject &reque
 
     auto &vision = context.vision;
     auto &llm = context.llm;
-    std::array<size_t, 4> featureBytes{};
-    std::array<std::vector<float16>, 4> features;
-    for (size_t layer = 0; layer < features.size(); ++layer) {
-        const auto *attr = vision.outputs[layer].attr;
-        size_t elements = 1;
-        for (size_t axis = 0; axis < attr->n_dims; ++axis)
-            elements *= attr->shape[axis];
-        featureBytes[layer] = elements * sizeof(float16);
-        const auto bytes = vision.outputs[layer].mem->size;
-        if (!elements || bytes < featureBytes[layer] || bytes % sizeof(float16))
-            return -1;
-        // The encoder writes its aligned output. Each following frame replaces
-        // the previous frame's trailing padding, keeping the token rows contiguous.
-        features[layer].resize((FrameCount - 1) * elements + bytes / sizeof(float16));
-    }
-
     QElapsedTimer clock;
     clock.start();
     QByteArray prompt;
+    int reusedFrames = 0;
     for (size_t i = 0; i < FrameCount; ++i) {
         if (fieldops_cancelled.load())
             return 0;
-        image_buffer_t image{};
-        const auto file = QFile::encodeName(files[int(i)].toString());
-        const auto read = read_image(file.constData(), &image);
-        std::unique_ptr<void, decltype(&free)> pixels(image.virt_addr, free);
-        if (read != 0)
+        bool reused = false;
+        if (!buffers.encodeFrame(files[int(i)].toString(), i, reused))
             return -1;
-        const auto target = [&](size_t layer) {
-            return features[layer].data() + i * featureBytes[layer] / sizeof(float16);
-        };
-        const int ret = inference_qwen3_vl_vision(&vision, &image, target(0), target(1), target(2), target(3));
-        if (ret != 0)
-            return ret;
+        reusedFrames += reused;
         prompt += QByteArray("帧") + QByteArray::number(i + 1) + "（" +
                   QByteArray::number(offsets[int(i)].toInt()) + "毫秒）<image>\n";
     }
@@ -117,7 +190,7 @@ int runClip(rknn_app_context_t &context, Callbacks &cb, const QJsonObject &reque
     auto &input = inputs[0].multimodal_input;
     input.name = "input_embeds";
     input.prompt = prompt.constData();
-    input.image.image_embed = features[0].data();
+    input.image.image_embed = buffers.primary();
     input.image.n_image = FrameCount;
     input.image.n_image_tokens = vision.embeds_shape[vision.embeds_ndims - 2];
     input.image.image_width = vision.model_width;
@@ -126,25 +199,9 @@ int runClip(rknn_app_context_t &context, Callbacks &cb, const QJsonObject &reque
     input.image.image_end = "<|vision_end|>";
     input.image.image_content = "<|image_pad|>";
 
-    std::array<rknn3_tensor_mem *, 3> extra{};
-    ResidentCleanup freeExtra{[&] {
-        for (auto *mem : extra)
-            if (mem)
-                rknn3_destroy_mem(llm.rknn_ctx, mem);
-    }};
-    for (size_t i = 0; i < extra.size(); ++i) {
-        const auto layer = i + 1;
-        const auto bytes = features[layer].size() * sizeof(float16);
-        rknn3_tensor_attr attr{};
-        attr.index = uint32_t(i + 2);
-        if (rknn3_query(llm.rknn_ctx, RKNN3_QUERY_INPUT_ATTR, &attr, sizeof(attr)) != 0)
-            return -1;
-        extra[i] = rknn3_create_mem(llm.rknn_ctx, bytes, attr.core_id, RKNN3_FLAG_MEMORY_CACHEABLE);
-        if (!extra[i] || !extra[i]->virt_addr || extra[i]->size < bytes)
-            return -1;
-        std::memcpy(extra[i]->virt_addr, features[layer].data(), bytes);
+    for (size_t layer = 1; layer < 4; ++layer) {
         inputs[layer].input_type = RKNN3_LLM_INPUT_AUX;
-        inputs[layer].aux_input.mem = extra[i];
+        inputs[layer].aux_input.mem = buffers.aux(layer);
     }
     cb.output.clear();
     cb.failed = false;
@@ -155,7 +212,8 @@ int runClip(rknn_app_context_t &context, Callbacks &cb, const QJsonObject &reque
         return ret ? ret : -1;
     const auto decoded = cb.tokenizer.Decode(cb.output.data(), cb.output.size());
     const auto result = QJsonDocument(QJsonObject{{"text", QString::fromStdString(decoded)},
-        {"vision_ms", double(visionMs)}, {"inference_ms", double(clock.elapsed())}}).toJson(QJsonDocument::Compact);
+        {"vision_ms", double(visionMs)}, {"inference_ms", double(clock.elapsed())},
+        {"reused_frames", reusedFrames}}).toJson(QJsonDocument::Compact);
     printf("\n@@VIDEO@@%s\n", result.constData());
     fflush(stdout);
     return 0;
@@ -215,7 +273,10 @@ int main(int argc, char **argv)
     ResidentCleanup cleanup{[&] { release_qwen3_vl_model(&context); }};
     if (context.vision.io_num.n_output != 4 || context.vision.embeds_ndims < 2)
         return 1;
+    ClipBuffers buffers(context);
+    if (!buffers.initialize())
+        return 1;
     resident_loop(clock.elapsed(), context.llm.rknn_sess, context.llm.rknn_ctx,
-                  [&](const QJsonObject &request) { return runClip(context, cb, request); });
+                  [&](const QJsonObject &request) { return runClip(context, cb, buffers, request); });
     return 0;
 }

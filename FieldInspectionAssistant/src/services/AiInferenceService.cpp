@@ -134,14 +134,22 @@ void AiInferenceService::clearSession(){
 void AiInferenceService::prepareModel(const QString &model,bool online) {
     if (!available_ || busy_) return;
     if (model!="qwen35" && model!="qwen25vl" && model!="qwen3_asr") return;
-    if (!system_.value("preload_error").toString().isEmpty()) return;
     const QString key=model+(model=="qwen3_asr"&&online?"_online":"");
     if (system_.value("loading_model").toString()==key) return;
+    if (system_.value("pending_preloads").toStringList().contains(key)) return;
     for (const auto &row:system_.value("resident_models").toList())
         if (row.toMap().value("model").toString()==key) return;
+    requestPrepare({{"model",model},{"online",online}});
+}
+
+void AiInferenceService::prepareStartup() {
+    requestPrepare({{"profile","desktop"}});
+}
+
+void AiInferenceService::requestPrepare(const QJsonObject &options) {
     QNetworkRequest req(QUrl(QStringLiteral("http://127.0.0.1:1828/api/models/prepare")));
     req.setHeader(QNetworkRequest::ContentTypeHeader,QStringLiteral("application/json"));req.setTransferTimeout(4000);
-    auto *reply=manager_.post(req,QJsonDocument(QJsonObject{{"model",model},{"online",online}}).toJson(QJsonDocument::Compact));
+    auto *reply=manager_.post(req,QJsonDocument(options).toJson(QJsonDocument::Compact));
     connect(reply,&QNetworkReply::finished,this,[this,reply]{reply->deleteLater();refreshStatus();});
 }
 
@@ -169,6 +177,7 @@ void AiInferenceService::submit(const QString &mode, const QString &question, co
     searchEvidence_.clear();searching_=false;pendingPayload_={};visionSearchStage_=false;visionQuestion_.clear();visionMetrics_.clear();
     busy_ = true; answer_.clear(); metrics_.clear(); jobId_.clear(); mode_ = mode; message_ = QStringLiteral("提交推理任务…"); emit changed();
     QJsonObject payload{{"mode", mode}, {"question", question}, {"path", path}, {"answer_limit", mode=="asr" ? 0 : maxTokens}, {"max_tokens", mode=="asr" ? 4096 : qBound(512,tokenBudget,4096)}, {"thinking", thinking}, {"online", online}};
+    if (mode=="asr" && realtimeAudio_) payload.insert("realtime_audio", true);
     if (!model.isEmpty()) payload.insert("model", model);
     if(webSearch&&(mode=="text"||mode=="vision")){
         searching_=true;pendingPayload_=payload;message_=QStringLiteral("正在联网搜索…");emit changed();web_->search(searchQuery.isEmpty()?question:searchQuery);return;

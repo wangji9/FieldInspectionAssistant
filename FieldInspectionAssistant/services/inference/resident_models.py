@@ -1,7 +1,7 @@
 """Persistent RK1828 workers with measured memory-aware LRU retention.
 
-Requests remain serialized by server.py. This lock also covers background
-preloading, so two clients never write into one model session at the same time.
+The board scheduler owns foreground work and speculative loading. A pool
+operation never shares one resident session between two callers.
 """
 import json
 import os
@@ -109,7 +109,7 @@ class ResidentPool:
     def __init__(self, root, specs, profile=None):
         self.root=Path(root);self.specs=specs;self.profile=profile or nullcontext
         self.lock=threading.RLock();self.state_lock=threading.Lock()
-        self.workers={};self.loading='';self.last_error='';self.prepare_generation=0;self.memory_info={}
+        self.workers={};self.loading='';self.last_error='';self.memory_info={}
 
     def status(self):
         with self.state_lock:
@@ -124,24 +124,30 @@ class ResidentPool:
 
     def release_idle(self, keys, age):
         if not self.lock.acquire(False):
-            return
+            return False
         try:
+            released=False
             now = time.monotonic()
             for key in keys:
                 entry = self.workers.get(key)
                 if entry and now - entry['last_used'] >= age:
                     self.evict(key)
+                    released=True
+            return released
         finally:
             self.lock.release()
 
-    def ensure(self,key,callback=lambda message:None):
+    def ensure(self,key,callback=lambda message:None,allow_eviction=True):
         entry=self.workers.get(key)
         if entry and entry['worker'].proc.poll() is None:
             entry['last_used']=time.monotonic();return entry,True
         if entry:self.evict(key)
         # Video model startup can briefly exceed its steady-state allocation.
         for loaded in list(self.workers):
-            if key.startswith('qwen3_video') or loaded.startswith('qwen3_video'): self.evict(loaded)
+            if key.startswith('qwen3_video') or loaded.startswith('qwen3_video'):
+                if not allow_eviction:
+                    return None,False
+                self.evict(loaded)
         required=self.estimates.get(key,4900)
         free=None
         while self.workers:
@@ -149,7 +155,9 @@ class ResidentPool:
             memory=self.workers[latest]['worker'].memory()
             with self.state_lock:self.memory_info={k:v for k,v in memory.items() if k.startswith('device_')}
             free=memory.get('device_free_mb')
-            if free is not None and free>=required+32:break
+            if free is not None and free>=required+(32 if allow_eviction else 96):break
+            if not allow_eviction:
+                return None,False
             oldest=min(self.workers,key=lambda k:self.workers[k]['last_used'])
             callback('正在释放闲置模型以准备 '+key)
             self.evict(oldest)
@@ -165,14 +173,15 @@ class ResidentPool:
                     break
                 except Exception:
                     worker.close()
-                    if attempt or not self.workers:raise
+                    if attempt or not self.workers or not allow_eviction:raise
                     for old in list(self.workers):self.evict(old)
             remaining=ready.get('device_free_mb')
             with self.state_lock:self.memory_info={k:v for k,v in ready.items() if k.startswith('device_')}
             total=ready.get('device_total_mb')
             allocated=(max(0,total-remaining) if alone and total is not None and remaining is not None
                        else max(0,free-remaining) if free is not None and remaining is not None else None)
-            if allocated:self.estimates[key]=allocated+32
+            # Admission already adds its own headroom to the measured allocation.
+            if allocated:self.estimates[key]=allocated
             entry=dict(worker=worker,load_ms=ready['load_ms'],last_used=time.monotonic(),requests=0,memory_mb=allocated)
             with self.state_lock:self.workers[key]=entry
             return entry,False
@@ -207,22 +216,10 @@ class ResidentPool:
                 raise
             finally:on_process(None)
 
-    def prepare(self,key,also_asr=False):
-        with self.state_lock:self.prepare_generation+=1;generation=self.prepare_generation
-        def warm():
-            try:
-                with self.profile():
-                    with self.lock:
-                        if generation!=self.prepare_generation:return
-                        self.ensure(key)
-                        if also_asr and generation==self.prepare_generation and key=='qwen35':
-                            self.ensure('qwen3_asr')
-            except Exception as exc:
-                with self.state_lock:self.last_error=str(exc)
-        threading.Thread(target=warm,daemon=True).start()
+    def preload(self,key,allow_eviction=False):
+        with self.profile(),self.lock:
+            self.ensure(key,allow_eviction=allow_eviction)
 
-    def close(self,cancel_prepares=False):
+    def close(self):
         with self.lock:
-            if cancel_prepares:
-                with self.state_lock:self.prepare_generation+=1
             for key in list(self.workers):self.evict(key)

@@ -86,6 +86,8 @@ bool AppController::start() {
         refreshModels();
     started_ = true;
     emit startedChanged();
+    if (!qEnvironmentVariableIsSet("FIELDOPS_QA_SCRIPT"))
+        QTimer::singleShot(0,ai_,&AiInferenceService::prepareStartup);
     return true;
 }
 

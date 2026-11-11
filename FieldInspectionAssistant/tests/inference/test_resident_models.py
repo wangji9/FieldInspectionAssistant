@@ -10,11 +10,12 @@ import sys,json,os,time
 def event(value):
     data=('\n@@RESIDENT@@'+json.dumps(value)+'\n').encode()
     for i in range(0,len(data),3):os.write(1,data[i:i+3])
-event(dict(event='ready',load_ms=42,device_free_mb=2000))
+free=int(sys.argv[1]) if len(sys.argv)>1 else 2000
+event(dict(event='ready',load_ms=42,device_free_mb=free))
 for line in sys.stdin:
     obj=json.loads(line)
     if obj.get('op')=='memory':
-        event(dict(event='done',id=obj['id'],code=0,device_free_mb=2000));continue
+        event(dict(event='done',id=obj['id'],code=0,device_free_mb=free));continue
     data='\u4f60\u597d\uff0c\u5de1\u68c0\u52a9\u624b'.encode('utf8')
     for b in data:os.write(1,bytes([b]))
     event(dict(event='done',id=obj['id'],code=0))
@@ -48,6 +49,23 @@ class ResidentTests(unittest.TestCase):
         self.assertEqual(self.run_model('small')['worker_pid'],first['worker_pid'])
         self.run_model('large')
         self.assertEqual([x['model'] for x in self.pool.status()['resident_models']],['large'])
+
+    def test_measured_allocation_allows_restoring_a_fitting_resident(self):
+        self.pool.specs = lambda key: ([sys.executable, "-u", str(self.script),
+                                      "2162" if key == "small" else "119"], self.root)
+        self.pool.estimates["other"] = 2000
+        self.pool.preload("small")
+        self.pool.preload("other")
+        self.pool.evict("other")
+        self.pool.preload("other")
+        self.assertEqual([row["model"] for row in self.pool.status()["resident_models"]],
+                         ["small", "other"])
+
+    def test_speculative_preload_leaves_existing_residents_in_place(self):
+        first=self.run_model('small')
+        self.pool.preload('large')
+        self.assertEqual([x['model'] for x in self.pool.status()['resident_models']],['small'])
+        self.assertEqual(self.run_model('small')['worker_pid'],first['worker_pid'])
 
 
 if __name__=='__main__':unittest.main()

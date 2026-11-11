@@ -90,6 +90,10 @@ python3 deploy/install_desktop_launcher.py
 
 登录时可选「在本机保持登录」。凭据仅保存在当前板端用户数据目录，退出登录或切换账号时清除。共用系统账户的场合可在登录时取消勾选。推理服务使用系统默认调频策略，运行推理无需 sudo。
 
+服务启动及桌面打开时会异步准备 Qwen3.5-4B 和语音识别模型。语音模型按 RK1828 可用内存加载，后台预热保留已驻留的模型。需要关闭启动预热时，可在 `board-ai.service` 的 systemd 覆盖配置中设置 `Environment=FIELDOPS_STARTUP_PRELOAD=0`。较大的视频模型在开始视频理解时预热，空闲 45 秒后释放并恢复默认模型。实时语音优先，视频片段只保留一个等待位置，超时后继续分析新画面。普通任务可在排队时取消。正在执行的推理不会被后续任务强行打断。音频由最多两个后台线程准备，已有 16 kHz 单声道 PCM16 WAV 跳过 FFmpeg 重采样。视频理解的 C++ 进程复用设备缓冲区及重叠片段的视觉特征；视觉分割跟踪和轮廓绘制在独立线程执行，预览只提交最新待处理帧。
+
+`GET /api/status` 可检查 `resident_models`、`loading_model`、`pending_preloads` 和 `queued`。任务详情包含 `queue_wait_ms`，语音任务额外报告 `audio_prepare_ms` 和 `audio_pcm_passthrough`，视频响应包含 `vision_ms` 与 `reused_frames`。
+
 安装后可双击桌面的「现场巡检助手」，也可在 `ztl` 的桌面终端执行以下命令。最后一条会打开程序或切换到已打开的窗口。
 
 ```bash

@@ -13,7 +13,7 @@ int VoiceMessageModel::append(QVariantMap r){int i=rows_.size();QVariantMap defa
 void VoiceMessageModel::patch(int i,const QVariantMap&r){if(i<0||i>=rows_.size())return;auto row=rows_[i].toMap();for(auto it=r.begin();it!=r.end();++it)row[it.key()]=it.value();rows_[i]=row;emit dataChanged(index(i),index(i));}
 void VoiceMessageModel::load(QVariantList r){beginResetModel();rows_=r;endResetModel();}
 VoiceAssistantService::VoiceAssistantService(SessionManager*s,WorkspaceService*w,QObject*p):QObject(p),session_(s),workspace_(w),asr_(new AiInferenceService(this)),llm_(new AiInferenceService(this)),messages_(this){
- asr_->setSession(s);llm_->setSession(s);volume_=25;silenceMs_=700;
+ asr_->setSession(s);asr_->setRealtimeAudio(true);llm_->setSession(s);volume_=25;silenceMs_=700;
  ttsTimeout_.setSingleShot(true);ttsTimeout_.setInterval(30000);connect(&ttsTimeout_,&QTimer::timeout,this,[this]{tts_.kill();if(busy())fail("语音合成超时，请重试");});
  playTimeout_.setSingleShot(true);playTimeout_.setInterval(45000);connect(&playTimeout_,&QTimer::timeout,this,[this]{if(busy())fail("扬声器播放超时，请检查 USB 声卡");});
  availabilityTimer_.setInterval(200);connect(&availabilityTimer_,&QTimer::timeout,this,[this]{if(!requested_||muted_)return;if(guard_&&guard_()){if(active()||busy())suspendForActivity();return;}if(!active()&&!busy()&&QDateTime::currentMSecsSinceEpoch()>=retryAt_)enable();});availabilityTimer_.start();

@@ -18,6 +18,7 @@ constexpr int MaxResults = 120;
 VideoUnderstandingService::VideoUnderstandingService(CameraService *camera, SessionManager *session, QObject *parent)
     : QObject(parent), camera_(camera), session_(session), status_(tr("选择摄像头后开始分析"))
 {
+    encoderPool_.setMaxThreadCount(1);
     connect(camera_, &CameraService::frameReady, this, &VideoUnderstandingService::onFrame);
     connect(camera_, &CameraService::error, this, [this](const QString &message) {
         if (active_)
@@ -78,6 +79,11 @@ bool VideoUnderstandingService::start(const QString &device, const QString &mode
         finish(camera_->status());
         return false;
     }
+    QNetworkRequest prepare(QUrl(QStringLiteral("http://127.0.0.1:1828/api/models/prepare")));
+    prepare.setHeader(QNetworkRequest::ContentTypeHeader,QStringLiteral("application/json"));
+    prepare.setTransferTimeout(3000);
+    auto *warm=network_.post(prepare,QJsonDocument(QJsonObject{{"model",model_}}).toJson(QJsonDocument::Compact));
+    connect(warm,&QNetworkReply::finished,warm,&QObject::deleteLater);
     return true;
 }
 
@@ -137,17 +143,29 @@ void VideoUnderstandingService::submitLatest()
     pending_ = samples_;
     encodingGeneration_ = generation_;
     setStatus(events_.isEmpty() ? tr("正在加载模型并分析首个片段") : tr("正在分析最新片段"));
-    encoding_.setFuture(QtConcurrent::run([clip = pending_, model = model_] {
+    encoding_.setFuture(QtConcurrent::run(&encoderPool_, [clip = pending_, model = model_,
+                                                            generation = generation_, cache = encodedSamples_] {
+        if (cache->generation != generation) {
+            cache->images.clear();
+            cache->generation = generation;
+        }
         QJsonArray images, offsets;
+        QHash<qint64,QByteArray> current;
         for (const auto &sample : clip) {
-            QByteArray jpeg;
-            QBuffer output(&jpeg);
-            if (!output.open(QIODevice::WriteOnly) ||
-                !sample.image.scaled(640, 640, Qt::KeepAspectRatio, Qt::SmoothTransformation).save(&output, "JPEG", 88))
-                return QByteArray();
-            images.append(QString::fromLatin1(jpeg.toBase64()));
+            auto encoded = cache->images.value(sample.elapsedMs);
+            if (encoded.isEmpty()) {
+                QByteArray jpeg;
+                QBuffer output(&jpeg);
+                if (!output.open(QIODevice::WriteOnly) ||
+                    !sample.image.scaled(640, 640, Qt::KeepAspectRatio, Qt::SmoothTransformation).save(&output, "JPEG", 88))
+                    return QByteArray();
+                encoded = jpeg.toBase64();
+            }
+            images.append(QString::fromLatin1(encoded));
+            current.insert(sample.elapsedMs,std::move(encoded));
             offsets.append(int(sample.elapsedMs - clip.first().elapsedMs));
         }
+        cache->images = std::move(current);
         return QJsonDocument(QJsonObject{{"frames", images}, {"offsets", offsets}, {"model", model}}).toJson(QJsonDocument::Compact);
     }));
 }

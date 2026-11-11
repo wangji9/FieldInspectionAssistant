@@ -2,6 +2,7 @@
 
 DictationService::DictationService(SpeechService *speech,AiInferenceService *model,QObject *parent)
     :QObject(parent),speech_(speech),model_(model),recognizer_(new AiInferenceService(this)) {
+    recognizer_->setRealtimeAudio(true);
     connect(speech_,&SpeechService::recordingReady,this,[this](const QString &path){
         if(waiting_&&!cancelled_) { waiting_=false;recognize(path); }
     });
