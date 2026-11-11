@@ -1,6 +1,5 @@
 import QtQuick
 import QtQuick.Controls
-import QtQuick.Layouts
 import "../theme"
 
 Flickable {
@@ -8,19 +7,18 @@ Flickable {
     required property var projectPage
     clip: true
     contentWidth: width
-    contentHeight: Math.max(height, layout.implicitHeight + 10)
+    contentHeight: Math.max(height, layout.height + 4)
     boundsBehavior: Flickable.StopAtBounds
     flickableDirection: Flickable.VerticalFlick
     ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
 
-    ColumnLayout {
+    Column {
         id: layout
         width: Math.max(0, pane.width - 12)
         spacing: 7
 
         Flow {
-            Layout.fillWidth: true
-            Layout.preferredHeight: childrenRect.height
+            width: layout.width
             spacing: 5
             TouchButton {
                 objectName: "diagnosisStart"
@@ -52,7 +50,7 @@ Flickable {
         }
 
         Label {
-            Layout.fillWidth: true
+            width: layout.width
             text: pane.projectPage.inference.status
             wrapMode: Text.WrapAnywhere
             color: Colors.textSecondary
@@ -60,8 +58,8 @@ Flickable {
 
         DataTable {
             objectName: "diagnosisInputTable"
-            Layout.fillWidth: true
-            Layout.preferredHeight: Math.max(130, Math.min(250, pane.height * .38))
+            width: layout.width
+            height: 32 + rowHeight * Math.max(2, Math.min(5, items.length))
             spreadsheet: true
             items: pane.projectPage.visibleEvents
             emptyText: "暂无诊断对象，请先从工程资料生成融合事件"
@@ -72,14 +70,14 @@ Flickable {
         }
 
         Label {
-            Layout.fillWidth: true
+            width: layout.width
             text: pane.projectPage.hasDiagnosis ? "诊断结果" : "诊断依据"
             font.bold: true
         }
 
         ScrollView {
-            Layout.fillWidth: true
-            Layout.preferredHeight: Math.max(145, pane.height - 255)
+            width: layout.width
+            height: Math.max(165, pane.height - y - 4)
             contentWidth: availableWidth
             clip: true
             ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
