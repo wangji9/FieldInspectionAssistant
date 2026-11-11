@@ -5,7 +5,7 @@ import QtQuick.Layouts
 import "../theme"
 import "../components"
 Rectangle {
-    id:root;objectName:"productPage";color:Colors.background
+    id:root;objectName:"productPage";color:root.settingsTabs ? Colors.panel : Colors.background
     property bool embedded:false
     property bool showHeading:true
     signal backRequested()
@@ -35,10 +35,34 @@ Rectangle {
     property string maintenanceText:""
     property string conclusion:""
     property string correctionReason:""
-    property int retentionDays:90
-    readonly property var tabs:section==="devices"?[{key:"components",name:"部件"},{key:"points",name:"测点"},{key:"channels",name:"通道绑定"},{key:"calibrations",name:"标定记录"},{key:"baselines",name:"健康基准"}]:section==="tasks"?[{key:"tasks",name:"任务"},{key:"plans",name:"周期计划"},{key:"reminders",name:"漏检与超期"},{key:"handovers",name:"交接记录"}]:section==="evidence"?[{key:"evidence",name:"证据"},{key:"records",name:"巡检记录"}]:section==="reports"?[{key:"records",name:"巡检记录"},{key:"reports",name:"报告版本"}]:section==="data"?[{key:"maintenance",name:"数据维护"},{key:"recycle",name:"回收站"}]:[{key:"maintenance",name:"运行维护"}]
+    property int retentionDays: 90
+    property string syncMessage: ""
+    readonly property bool maintenanceView: entity === "maintenance" || entity === "runtime"
+    readonly property bool dataMaintenance: section === "data" && entity === "maintenance"
+    readonly property bool settingsTabs: embedded && section === "data"
+
+    function selectEntity(key) {
+        if (!tabs.some(tab => tab.key === key) || entity === key) return
+        entity = key
+        page = 0
+        selected = ({})
+        refresh()
+    }
+
+    function exportInspectionCsv() {
+        const path = App.dataDir + "/export_" + Qt.formatDate(new Date(), "yyyy-MM-dd") + ".csv"
+        const result = App.evidence.exportCsv(path)
+        syncMessage = result.ok ? "已导出 · " + path : result.error
+    }
+
+    function syncNow() {
+        const result = App.sync.flush()
+        syncMessage = result.ok ? "同步完成 · " + (result.sent ?? 0) + " 条" : result.error
+    }
+
+    readonly property var tabs:section==="devices"?[{key:"components",name:"部件"},{key:"points",name:"测点"},{key:"channels",name:"通道绑定"},{key:"calibrations",name:"标定记录"},{key:"baselines",name:"健康基准"}]:section==="tasks"?[{key:"tasks",name:"任务"},{key:"plans",name:"周期计划"},{key:"reminders",name:"漏检与超期"},{key:"handovers",name:"交接记录"}]:section==="evidence"?[{key:"evidence",name:"证据"},{key:"records",name:"巡检记录"}]:section==="reports"?[{key:"records",name:"巡检记录"},{key:"reports",name:"报告版本"}]:section==="data"?[{key:"maintenance",name:"备份与同步"},{key:"recycle",name:"回收站"},{key:"runtime",name:"运行维护"}]:[{key:"maintenance",name:"运行维护"}]
     function setup(options){var opts=options||{section:App.nav.param("section"),asset_id:App.nav.param("asset_id"),record_id:App.nav.param("record_id")};section=opts.section||"devices";assetFilter=opts.asset_id||"";recordFilter=opts.record_id||"";entity=tabs[0].key;page=0;selected=({});reportData=({});refresh()}
-    function refresh(){if(!App.session.loggedIn)return;var f={keyword:keyword,asset_id:assetFilter,record_id:recordFilter};if(entity==="maintenance")return;var r=App.workspace.query(entity,f,page,30);if(!r.ok){message=r.error;return}items=r.rows;total=r.total;selectedIndex=-1;for(var i=0;i<items.length;i++)if(items[i].id===selected.id)selectedIndex=i;if(selectedIndex<0&&items.length)selectedIndex=0;selected=selectedIndex>=0?items[selectedIndex]:({});if(section==="reports"&&selected.id)loadReport()}
+    function refresh(){if(!App.session.loggedIn)return;var f={keyword:keyword,asset_id:assetFilter,record_id:recordFilter};if(maintenanceView)return;var r=App.workspace.query(entity,f,page,30);if(!r.ok){message=r.error;return}items=r.rows;total=r.total;selectedIndex=-1;for(var i=0;i<items.length;i++)if(items[i].id===selected.id)selectedIndex=i;if(selectedIndex<0&&items.length)selectedIndex=0;selected=selectedIndex>=0?items[selectedIndex]:({});if(section==="reports"&&selected.id)loadReport()}
     function loadReport(){var id=entity==="reports"?selected.record_id:selected.id;if(id){reportData=entity==="reports"?App.workspace.reportVersion(selected.id):App.workspace.report(id);conclusion=(reportData.snapshot||{}).human_conclusion||"";correctionReason=""}}
     function choice(key,label,type,filter){return {key:key,label:label,type:"choice",options:(key==="point_id"?[{id:"",name:"不指定测点"}]:[]).concat(App.workspace.options(type,filter||{}))}}
     function editItem(creating){
@@ -78,7 +102,7 @@ Rectangle {
     Connections{target:App.nav;function onPageChanged(){if(!root.embedded&&App.nav.page==="product")root.setup()}}
     Connections{target:App.workspace;function onDataChanged(){if(root.visible)root.refresh()}function onMaintenanceReady(action,result){root.maintenanceText=JSON.stringify(result,null,2);if(action==="cleanup_preview")root.cleanupToken=result.token||"";if(action==="cleanup")root.undoToken=result.undo_token||"";if(action==="restore_prepare")root.restoreToken=result.token||"";if(action==="stage_release"||action==="snapshot_release"||action==="prepare_rollback")root.releaseToken=result.token||"";if(action==="releases")root.releases=result.rows||[]}}
     ColumnLayout{
-        anchors.fill:parent;anchors.margins:Dimensions.pagePadding;spacing:10
+        anchors.fill:parent;anchors.margins:root.settingsTabs ? 0 : Dimensions.pagePadding;spacing:root.settingsTabs ? 6 : 10
         RowLayout{
             visible:root.showHeading;Layout.fillWidth:true
             TouchButton{text:"返回";autoWidth:true;height:34;variant:"ghost";onClicked:if(root.embedded)root.backRequested();else App.nav.pop()}
@@ -86,12 +110,30 @@ Rectangle {
             Item{Layout.fillWidth:true}
             TouchButton{text:"刷新";autoWidth:true;height:34;onClicked:root.refresh()}
         }
-        Flow{
-            visible:root.tabs.length>1;Layout.fillWidth:true;spacing:6
-            Repeater{model:root.tabs;TouchButton{text:modelData.name;autoWidth:true;height:34;variant:root.entity===modelData.key?"tonal":"ghost";onClicked:{root.entity=modelData.key;root.page=0;root.selected=({});root.refresh()}}}
+        AppTabs {
+            visible: root.settingsTabs
+            Layout.fillWidth: true
+            objectName: "settingsMaintenanceTabs"
+            objectPrefix: "maintenanceTab_"
+            sections: root.tabs.map(tab => ({id:tab.key, title:tab.name}))
+            selected: root.entity
+            onNavigate: function(key) { root.selectEntity(key) }
+        }
+        Flow {
+            visible: !root.settingsTabs && root.tabs.length > 1
+            Layout.fillWidth: true
+            spacing: 6
+            Repeater {
+                model: root.tabs
+                TouchButton {
+                    text: modelData.name; autoWidth: true; height: 34
+                    variant: root.entity === modelData.key ? "tonal" : "ghost"
+                    onClicked: root.selectEntity(modelData.key)
+                }
+            }
         }
         RowLayout{
-            visible:root.entity!=="maintenance";Layout.fillWidth:true
+            visible:!root.maintenanceView;Layout.fillWidth:true
             FieldInput{Layout.fillWidth:true;Layout.maximumWidth:300;placeholder:"搜索";height:34;onTextEdited:function(v){root.keyword=v;root.page=0;root.refresh()}}
             TouchButton{text:"清除筛选";autoWidth:true;height:34;visible:!!root.assetFilter||!!root.recordFilter;onClicked:{root.assetFilter="";root.recordFilter="";root.refresh()}}
             TouchButton{objectName:"productNew";text:"新增";autoWidth:true;height:34;visible:["components","points","channels","calibrations","baselines","tasks","plans"].indexOf(root.entity)>=0&&App.session.permissions.manage_assets;onClicked:root.editItem(true)}
@@ -105,11 +147,11 @@ Rectangle {
         }
         Text{Layout.fillWidth:true;visible:root.message.length>0;text:root.message;color:Colors.danger;font.pixelSize:Typography.body;wrapMode:Text.Wrap}
         Rectangle{
-            visible:root.entity!=="maintenance";Layout.fillWidth:true;Layout.fillHeight:true;Layout.minimumHeight:100;color:Colors.panel;radius:10;border.color:Colors.border
+            visible:!root.maintenanceView;Layout.fillWidth:true;Layout.fillHeight:true;Layout.minimumHeight:100;color:Colors.panel;radius:10;border.color:Colors.border
             DataTable{anchors.fill:parent;items:root.items;selectedIndex:root.selectedIndex;columns:root.columns();onRowClicked:function(index,item){root.selectedIndex=index;root.selected=item;if(root.section==="reports")root.loadReport()}}
         }
         RowLayout{
-            visible:root.entity!=="maintenance";Layout.fillWidth:true
+            visible:!root.maintenanceView;Layout.fillWidth:true
             TouchButton{text:"上一页";autoWidth:true;height:32;enabled:root.page>0;onClicked:{root.page--;root.refresh()}}
             Text{text:(root.page+1)+" / "+Math.max(1,Math.ceil(root.total/30))+" · "+root.total+" 条";font.pixelSize:Typography.body;color:Colors.textSecondary}
             TouchButton{text:"下一页";autoWidth:true;height:32;enabled:(root.page+1)*30<root.total;onClicked:{root.page++;root.refresh()}}
@@ -140,37 +182,84 @@ Rectangle {
             }
         }
         ScrollView{
-            visible:root.entity==="maintenance";Layout.fillWidth:true;Layout.fillHeight:true;contentWidth:availableWidth;clip:true
+            visible:root.maintenanceView;Layout.fillWidth:true;Layout.fillHeight:true;contentWidth:availableWidth;clip:true
             ColumnLayout{
-                width:parent.width;spacing:14
+                width: parent.width
+                spacing: 8
+                Label { text: "导出与同步"; font.bold: true; visible: root.dataMaintenance }
+                Flow {
+                    Layout.fillWidth: true
+                    visible: root.dataMaintenance
+                    spacing: 6
+                    TouchButton { text: "导出巡检记录"; autoWidth: true; onClicked: root.exportInspectionCsv() }
+                    TouchButton {
+                        text: "立即同步"; autoWidth: true
+                        enabled: App.sync.configured && App.sync.online && !!App.session.permissions.settings
+                        onClicked: root.syncNow()
+                    }
+                    TouchButton {
+                        text: App.sync.online ? "暂停同步" : "允许同步"; autoWidth: true
+                        enabled: App.sync.configured && !!App.session.permissions.settings
+                        onClicked: App.sync.online = !App.sync.online
+                    }
+                    Label {
+                        height: Dimensions.buttonHeight
+                        verticalAlignment: Text.AlignVCenter
+                        visible: App.sync.configured
+                        text: "待同步 " + App.sync.pending + " 条"
+                        color: Colors.textSecondary
+                    }
+                }
+                Label {
+                    Layout.fillWidth: true
+                    visible: root.dataMaintenance && !!text
+                    text: root.syncMessage || App.sync.status
+                    wrapMode: Text.Wrap
+                    color: Colors.textSecondary
+                }
+                Label { text: root.dataMaintenance ? "备份与恢复" : "设备诊断"; font.bold: true }
                 Flow{
                     Layout.fillWidth:true;spacing:8
-                    TouchButton{visible:root.section!=="data";text:"设备自检";autoWidth:true;height:36;enabled:App.session.permissions.settings;onClicked:root.maintenanceText=JSON.stringify(App.workspace.diagnostics(),null,2)}
-                    TouchButton{visible:root.section==="data";text:"附件完整性";autoWidth:true;height:36;enabled:App.session.permissions.inspect&&!App.workspace.busy;onClicked:App.workspace.operation("integrity",{})}
-                    TouchButton{visible:root.section==="data";text:"备份";autoWidth:true;height:36;enabled:App.session.permissions.settings&&!App.workspace.busy;onClicked:root.chooseFile("backup",true)}
-                    TouchButton{visible:root.section==="data";text:"校验备份";autoWidth:true;height:36;enabled:App.session.permissions.settings&&!App.workspace.busy;onClicked:root.chooseFile("verify_backup",false)}
-                    TouchButton{visible:root.section==="data";text:"准备恢复";autoWidth:true;height:36;enabled:App.session.permissions.settings&&!App.workspace.busy;onClicked:root.chooseFile("restore_prepare",false)}
-                    TouchButton{visible:root.section==="data";text:"恢复并重启";autoWidth:true;height:36;enabled:App.session.permissions.settings&&!App.workspace.busy&&!!root.restoreToken;onClicked:root.authorizeAction("restore_apply",{token:root.restoreToken})}
+                    TouchButton{visible:!root.dataMaintenance;text:"设备自检";autoWidth:true;height:30;enabled:App.session.permissions.settings;onClicked:root.maintenanceText=JSON.stringify(App.workspace.diagnostics(),null,2)}
+                    TouchButton{visible:root.dataMaintenance;text:"附件完整性";autoWidth:true;height:30;enabled:App.session.permissions.inspect&&!App.workspace.busy;onClicked:App.workspace.operation("integrity",{})}
+                    TouchButton{visible:root.dataMaintenance;text:"备份";autoWidth:true;height:30;enabled:App.session.permissions.settings&&!App.workspace.busy;onClicked:root.chooseFile("backup",true)}
+                    TouchButton{visible:root.dataMaintenance;text:"校验备份";autoWidth:true;height:30;enabled:App.session.permissions.settings&&!App.workspace.busy;onClicked:root.chooseFile("verify_backup",false)}
+                    TouchButton{visible:root.dataMaintenance;text:"准备恢复";autoWidth:true;height:30;enabled:App.session.permissions.settings&&!App.workspace.busy;onClicked:root.chooseFile("restore_prepare",false)}
+                    TouchButton{visible:root.dataMaintenance;text:"恢复并重启";autoWidth:true;height:30;enabled:App.session.permissions.settings&&!App.workspace.busy&&!!root.restoreToken;onClicked:root.authorizeAction("restore_apply",{token:root.restoreToken})}
                 }
+                Label { text: "缓存清理"; font.bold: true; visible: root.dataMaintenance }
                 Flow{
-                    visible:root.section==="data";Layout.fillWidth:true;spacing:8
+                    visible:root.dataMaintenance;Layout.fillWidth:true;spacing:6
+                    Label { text:"保留天数"; height:30; verticalAlignment:Text.AlignVCenter }
                     SpinBox{from:7;to:3650;value:root.retentionDays;editable:true;onValueModified:root.retentionDays=value}
-                    TouchButton{text:"清理预览";autoWidth:true;height:36;enabled:App.session.permissions.settings&&!App.workspace.busy;onClicked:App.workspace.operation("cleanup_preview",{days:root.retentionDays})}
-                    TouchButton{text:"清理暂存与缓存";autoWidth:true;height:36;enabled:App.session.permissions.settings&&!!root.cleanupToken&&!App.workspace.busy;onClicked:root.authorizeAction("cleanup",{token:root.cleanupToken})}
-                    TouchButton{text:"撤销清理";autoWidth:true;height:36;enabled:App.session.permissions.settings&&!!root.undoToken&&!App.workspace.busy;onClicked:App.workspace.operation("cleanup_undo",{token:root.undoToken})}
+                    TouchButton{text:"清理预览";autoWidth:true;height:30;enabled:App.session.permissions.settings&&!App.workspace.busy;onClicked:App.workspace.operation("cleanup_preview",{days:root.retentionDays})}
+                    TouchButton{text:"清理暂存与缓存";autoWidth:true;height:30;enabled:App.session.permissions.settings&&!!root.cleanupToken&&!App.workspace.busy;onClicked:root.authorizeAction("cleanup",{token:root.cleanupToken})}
+                    TouchButton{text:"撤销清理";autoWidth:true;height:30;enabled:App.session.permissions.settings&&!!root.undoToken&&!App.workspace.busy;onClicked:App.workspace.operation("cleanup_undo",{token:root.undoToken})}
                 }
+                Label { text: "版本与服务"; font.bold: true; visible: !root.dataMaintenance }
                 Flow{
-                    visible:root.section!=="data";Layout.fillWidth:true;spacing:8
-                    TouchButton{text:"保存当前程序版本";autoWidth:true;height:36;enabled:App.session.permissions.settings&&!App.workspace.busy;onClicked:App.workspace.operation("snapshot_release",{version:App.version})}
-                    TouchButton{text:"校验升级包";autoWidth:true;height:36;enabled:App.session.permissions.settings&&!App.workspace.busy;onClicked:root.chooseFile("stage_release",false)}
-                    TouchButton{text:"应用已校验版本";autoWidth:true;height:36;enabled:App.session.permissions.settings&&!!root.releaseToken&&!App.workspace.busy;onClicked:root.authorizeAction("apply_release",{token:root.releaseToken})}
-                    TouchButton{text:"版本记录";autoWidth:true;height:36;enabled:App.session.permissions.settings&&!App.workspace.busy;onClicked:App.workspace.operation("releases",{})}
+                    visible:!root.dataMaintenance;Layout.fillWidth:true;spacing:6
+                    TouchButton{text:"保存当前程序版本";autoWidth:true;height:30;enabled:App.session.permissions.settings&&!App.workspace.busy;onClicked:App.workspace.operation("snapshot_release",{version:App.version})}
+                    TouchButton{text:"校验升级包";autoWidth:true;height:30;enabled:App.session.permissions.settings&&!App.workspace.busy;onClicked:root.chooseFile("stage_release",false)}
+                    TouchButton{text:"应用已校验版本";autoWidth:true;height:30;enabled:App.session.permissions.settings&&!!root.releaseToken&&!App.workspace.busy;onClicked:root.authorizeAction("apply_release",{token:root.releaseToken})}
+                    TouchButton{text:"版本记录";autoWidth:true;height:30;enabled:App.session.permissions.settings&&!App.workspace.busy;onClicked:App.workspace.operation("releases",{})}
                     AppComboBox{id:rollbackChoice;model:root.releases;textRole:"version";width:180;height:36;displayText:currentIndex<0?"选择历史版本":currentText}
-                    TouchButton{text:"准备回滚";autoWidth:true;height:36;enabled:App.session.permissions.settings&&rollbackChoice.currentIndex>=0&&!App.workspace.busy;onClicked:App.workspace.operation("prepare_rollback",{release_id:root.releases[rollbackChoice.currentIndex].token})}
-                    TouchButton{text:"恢复模型服务";autoWidth:true;height:36;enabled:App.session.permissions.settings&&!App.workspace.busy;onClicked:root.authorizeAction("restart_ai",{})}
+                    TouchButton{text:"准备回滚";autoWidth:true;height:30;enabled:App.session.permissions.settings&&rollbackChoice.currentIndex>=0&&!App.workspace.busy;onClicked:App.workspace.operation("prepare_rollback",{release_id:root.releases[rollbackChoice.currentIndex].token})}
+                    TouchButton{text:"恢复模型服务";autoWidth:true;height:30;enabled:App.session.permissions.settings&&!App.workspace.busy;onClicked:root.authorizeAction("restart_ai",{})}
                 }
                 Text{Layout.fillWidth:true;text:App.workspace.status;font.pixelSize:Typography.body;color:Colors.text;wrapMode:Text.Wrap}
-                TextArea{Layout.fillWidth:true;Layout.preferredHeight:Math.max(260,implicitHeight);readOnly:true;selectByMouse:true;text:root.maintenanceText;font.family:Typography.uiFamily;font.pixelSize:Typography.body;wrapMode:TextEdit.Wrap;background:Rectangle{color:Colors.panel;radius:10;border.color:Colors.border}}
+                Label { text: "最近操作结果"; font.bold: true; visible: !!root.maintenanceText }
+                TextArea {
+                    Layout.fillWidth: true
+                    visible: !!root.maintenanceText
+                    readOnly: true
+                    selectByMouse: true
+                    text: root.maintenanceText
+                    font.family: Typography.uiFamily
+                    font.pixelSize: Typography.body
+                    wrapMode: TextEdit.Wrap
+                    background: Rectangle { color: Colors.panel; border.color: Colors.border }
+                }
             }
         }
     }

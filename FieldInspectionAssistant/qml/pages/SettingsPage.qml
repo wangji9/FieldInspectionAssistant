@@ -4,214 +4,275 @@ import QtQuick.Layouts
 import "../theme"
 import "../components"
 
-// 系统设置：摄像头、存储、同步、检查标准阈值、账号权限、系统诊断
 Rectangle {
     id: root
     objectName: "settingsPage"
     color: Colors.background
 
-    property int currentTab: 0
-    property var permissionData: []
-    property var cameras: []
-    property var usersData: []
-    property var outboxData: []
+    property string currentSection: "hardware"
+    readonly property var sections: [
+        {id:"hardware", title:"设备与性能"},
+        {id:"assistant", title:"助手偏好"},
+        {id:"standards", title:"检查标准"},
+        {id:"users", title:"用户与权限"},
+        {id:"data", title:"数据与维护"}
+    ]
+    readonly property int currentTab: sections.findIndex(section => section.id === currentSection)
     property var thresholdItems: []
     property var minValues: ({})
     property var maxValues: ({})
     property string templateId: ""
-    property string cameraMessage: ""
-    property string storageMessage: ""
-    property string syncMessage: ""
     property string thresholdMessage: ""
-    property string accountMessage: ""
 
-    function refresh() {
-        root.cameras = App.evidence.cameras()
-        root.usersData = App.session.users()
-        root.outboxData = App.sync.outbox()
-        root.thresholdItems = App.inspection.templateItems()
-        var tmpls = App.assets.templates()
-        root.templateId = tmpls.length > 0 ? tmpls[0].id : ""
-        var m1 = {}, m2 = {}
-        for (var i = 0; i < root.thresholdItems.length; i++) {
-            var it = root.thresholdItems[i]
-            m1[it.key] = it.min === undefined || it.min === null ? "" : String(it.min)
-            m2[it.key] = it.max === undefined || it.max === null ? "" : String(it.max)
+    function selectSection(section) {
+        if (section === "deviceInfo") {
+            currentSection = "hardware"
+            hardware.openPerformance()
+        } else if (section === "runtime") {
+            currentSection = "data"
+            maintenance.selectEntity("runtime")
+        } else if (sections.some(item => item.id === section)) {
+            currentSection = section
+            if (section === "hardware") hardware.openConnections()
+            if (section === "data") maintenance.selectEntity("maintenance")
         }
-        root.minValues = m1
-        root.maxValues = m2
-        root.permissionData = root.permissionRows()
     }
+
+    function showRequestedSection() {
+        const section = App.nav.param("section")
+        if (section) selectSection(section)
+    }
+
+    function refreshThresholds() {
+        const templates = App.assets.templates()
+        templateId = templates.length ? templates[0].id : ""
+        thresholdItems = App.inspection.templateItems()
+        const minimum = {}, maximum = {}
+        for (const item of thresholdItems) {
+            minimum[item.key] = item.min ?? ""
+            maximum[item.key] = item.max ?? ""
+        }
+        minValues = minimum
+        maxValues = maximum
+        thresholdMessage = ""
+    }
+
     function saveThreshold(key) {
-        var it = root.thresholdItem(key)
-        if (!it) return
-        var r = App.assets.updateThreshold(root.templateId, key, root.minValues[key], root.maxValues[key], it.unit || "")
-        root.thresholdMessage = r.ok ? "已保存阈值：" + it.name : r.error
+        const item = thresholdItems.find(row => row.key === key)
+        if (!item) return
+        const result = App.assets.updateThreshold(templateId, key, String(minValues[key]), String(maxValues[key]), item.unit || "")
+        thresholdMessage = result.ok ? "已保存阈值 · " + item.name : result.error
     }
-    function thresholdItem(key) {
-        for (var i = 0; i < root.thresholdItems.length; i++)
-            if (root.thresholdItems[i].key === key) return root.thresholdItems[i]
-        return null
+
+    function updateMonitoring() {
+        App.hardware.active = visible && App.session.loggedIn && currentSection === "hardware"
+        if (App.hardware.active) App.ai.refreshStatus()
     }
-    function openCameraAt(path) {
-        root.cameraMessage = App.evidence.openCamera(path) ? "正在打开摄像头：" + path : App.camera.status
+
+    onCurrentSectionChanged: updateMonitoring()
+    onVisibleChanged: {
+        if (visible) showRequestedSection()
+        updateMonitoring()
     }
-    function flushSync() {
-        var r = App.sync.flush()
-        root.syncMessage = r.ok ? "同步完成：" + (r.sent !== undefined ? r.sent : "") : r.error
-        root.outboxData = App.sync.outbox()
-    }
-    function exportCsv() {
-        var d = new Date()
-        var mm = ("0" + (d.getMonth() + 1)).slice(-2)
-        var dd = ("0" + d.getDate()).slice(-2)
-        var path = App.dataDir + "/export_" + d.getFullYear() + "-" + mm + "-" + dd + ".csv"
-        var r = App.evidence.exportCsv(path)
-        root.storageMessage = r.ok ? "已导出：" + path : r.error
-    }
-    function switchUser(name) {
-        if (App.session.login(name)) {
-            root.accountMessage = "已切换账户：" + name + "（" + App.session.roleText() + "）"
-            root.usersData = App.session.users()
-            root.permissionData = root.permissionRows()
-        } else {
-            root.accountMessage = "切换失败：账户不可用"
+    Connections {
+        target: App.nav
+        function onPageChanged() {
+            if (App.nav.page === "settings") root.showRequestedSection()
         }
     }
-    function permissionRows() {
-        var perms = [
-            { key: "inspect", label: "巡检执行" },
-            { key: "register_defect", label: "缺陷登记" },
-            { key: "assign", label: "缺陷分派" },
-            { key: "review", label: "缺陷复核" },
-            { key: "start_defect", label: "缺陷处理" },
-            { key: "manage_assets", label: "设备管理" },
-            { key: "settings", label: "系统设置" }
-        ]
-        for (var i = 0; i < perms.length; i++) perms[i].allowed = App.session.can(perms[i].key)
-        return perms
+    Connections {
+        target: App.session
+        function onSessionChanged() { root.updateMonitoring() }
+    }
+    Timer {
+        interval: 3000
+        repeat: true
+        running: App.hardware.active && root.visible && root.currentSection === "hardware"
+        onTriggered: App.ai.refreshStatus()
     }
 
-    function showSection() {
-        const sections = {hardware: 0, assistant: 1, standards: 2, users: 3, data: 4, runtime: 5, deviceInfo: 6}
-        const tab = sections[App.nav.param("section")]
-        if (tab !== undefined) currentTab = tab
-    }
-    onVisibleChanged: {updateMonitoring();if (visible) { refresh(); showSection() }}
-    Component.onCompleted: refresh()
-
-    Connections {target:App.nav;function onPageChanged(){if(App.nav.page==="settings")root.showSection()}}
-    function updateMonitoring(){App.hardware.active=root.visible&&App.session.loggedIn&&[0,5,6].includes(root.currentTab);if(App.hardware.active)App.ai.refreshStatus()}
-    onCurrentTabChanged:updateMonitoring()
-    Timer{interval:3000;repeat:true;running:root.visible&&root.currentTab===0&&App.session.loggedIn;onTriggered:App.ai.refreshStatus()}
-    Connections{target:App.session;function onSessionChanged(){root.updateMonitoring()}}
     ColumnLayout {
-        anchors.fill: parent; anchors.margins: 16; spacing: 12
-        PageHeading {Layout.fillWidth:true;title:"系统设置"}
-        RowLayout {
-            Layout.fillWidth: true; spacing: 8
-            Repeater {
-                model: ["设备连接", "智能助手", "检查标准", "用户管理", "数据管理", "运行维护", "设备性能"]
-                TouchButton { text: modelData; autoWidth: true; height: 36; variant: root.currentTab === index ? "tonal" : "ghost"; onClicked: root.currentTab = index }
-            }
-            Item { Layout.fillWidth: true }
+        anchors.fill: parent
+        anchors.margins: 4
+        spacing: 4
+
+        AppTabs {
+            Layout.fillWidth: true
+            objectName: "settingsTabs"
+            objectPrefix: "settingsTab_"
+            sections: root.sections
+            selected: root.currentSection
+            onNavigate: function(section) { root.selectSection(section) }
         }
+
         StackLayout {
-            Layout.fillWidth: true; Layout.fillHeight: true; currentIndex: root.currentTab
-            HardwareConnectionsPane {panel:root}
-            Rectangle {
-                color: Colors.panel; border.color: Colors.border; radius: Dimensions.radius
-                ScrollView {
-                    id: assistantSettingsScroll
-                    anchors.fill: parent; anchors.margins: 20
-                    contentWidth: availableWidth; clip: true
-                ColumnLayout {
-                    width: assistantSettingsScroll.availableWidth; spacing: 18
-                    Text { text: "回答与显示"; font.pixelSize: Typography.h2; font.bold: true; color: Colors.text }
-                    Rectangle { Layout.fillWidth: true; height: 1; color: Colors.border }
-                    Flow {
-                        Layout.fillWidth: true; spacing: 12
-                        Text { text: "回答长度上限"; width: 160; height:40;verticalAlignment:Text.AlignVCenter;font.pixelSize: Typography.body; color: Colors.text }
-                        Repeater {
-                            model: [{name: "短答 · 96字", count: 96}, {name: "常规 · 256字", count: 256}, {name: "详细 · 512字", count: 512}, {name: "长篇 · 1024字", count: 1024}]
-                            TouchButton { text: modelData.name; autoWidth: true; height: 40; variant: App.ai.answerLengthLimit === modelData.count ? "primary" : "ghost"; onClicked: App.ai.answerLengthLimit = modelData.count }
-                        }
+            Layout.fillWidth: true
+            Layout.fillHeight: true
+            currentIndex: root.currentTab
+
+            HardwareConnectionsPane { id: hardware }
+
+            SettingsPanel {
+                title: "问答显示"
+                objectName: "settingsAssistantPanel"
+                GridLayout {
+                    Layout.alignment: Qt.AlignLeft | Qt.AlignTop
+                    columns: 2
+                    columnSpacing: 10
+                    rowSpacing: 6
+
+                    Label { text: "回答字数上限" }
+                    AppComboBox {
+                        objectName: "settingsAnswerLength"
+                        Layout.preferredWidth: 164
+                        textRole: "name"
+                        valueRole: "value"
+                        model: [{name:"短答 · 96 字",value:96}, {name:"常规 · 256 字",value:256},
+                                {name:"详细 · 512 字",value:512}, {name:"长篇 · 1024 字",value:1024}]
+                        currentIndex: model.findIndex(item => item.value === App.ai.answerLengthLimit)
+                        displayText: currentIndex < 0 ? App.ai.answerLengthLimit + " 字" : currentText
+                        onActivated: App.ai.answerLengthLimit = currentValue
                     }
-                    RowLayout {
-                        Layout.fillWidth: true; spacing: 16
-                        Text { text: "答案字号"; Layout.preferredWidth: 160; font.pixelSize: Typography.body; color: Colors.text }
-                        Repeater {
-                            model: [{name: "紧凑", size: 14}, {name: "常规", size: 16}, {name: "舒适", size: 18}]
-                            TouchButton { text: modelData.name; width: 100; height: 40; variant: App.ai.answerFontSize === modelData.size ? "primary" : "ghost"; onClicked: App.ai.answerFontSize = modelData.size }
-                        }
-                        Item { Layout.fillWidth: true }
+
+                    Label { text: "答案字号" }
+                    AppComboBox {
+                        objectName: "settingsAnswerFont"
+                        Layout.preferredWidth: 164
+                        textRole: "name"
+                        valueRole: "value"
+                        model: [{name:"紧凑 · 14",value:14}, {name:"常规 · 16",value:16}, {name:"舒适 · 18",value:18}]
+                        currentIndex: model.findIndex(item => item.value === App.ai.answerFontSize)
+                        displayText: currentIndex < 0 ? String(App.ai.answerFontSize) : currentText
+                        onActivated: App.ai.answerFontSize = currentValue
                     }
-                    Rectangle { Layout.fillWidth: true; height: 1; color: Colors.border }
-                    RowLayout {
-                        Layout.fillWidth: true
-                        Text { text: "回答方式"; Layout.preferredWidth: 176; font.pixelSize: Typography.body; color: Colors.text }
-                        Text { text: "直接回答，边生成边显示"; font.pixelSize: Typography.body; color: Colors.textSecondary }
-                        Item { Layout.fillWidth: true }
-                    }
-                    RowLayout {
-                        Layout.fillWidth: true
-                        Text { text: "适用模块"; Layout.preferredWidth: 176; font.pixelSize: Typography.body; color: Colors.text }
-                        Text { text: "文字问答、图片问答"; font.pixelSize: Typography.body; color: Colors.textSecondary }
-                        Item { Layout.fillWidth: true }
-                    }
-                    Item { Layout.fillHeight: true }
-                    Text { text: "设置自动保存，下次回答生效。"; font.pixelSize: Typography.body; color: Colors.textSecondary }
                 }
+                Label {
+                    Layout.fillWidth: true
+                    text: "适用于文字问答和图片问答，修改自动保存。"
+                    color: Colors.textSecondary
+                    wrapMode: Text.Wrap
                 }
+                Item { Layout.fillHeight: true }
             }
-            Rectangle {
-                color: Colors.panel; border.color: Colors.border; radius: Dimensions.radius
-                ColumnLayout {
-                    anchors.fill: parent; anchors.margins: 16; spacing: 12
-                    RowLayout {
-                        Layout.fillWidth: true; Layout.preferredHeight: 36; Layout.leftMargin: 6; Layout.rightMargin: 6; spacing: 12
-                        Text { text: "检查项目"; Layout.fillWidth: true; font.pixelSize: Typography.body; font.bold: true; color: Colors.text }
-                        Text { text: "方式"; Layout.preferredWidth: 100; font.pixelSize: Typography.body; color: Colors.textSecondary }
-                        Text { text: "下限"; Layout.preferredWidth: 125; font.pixelSize: Typography.body; color: Colors.textSecondary }
-                        Text { text: "上限"; Layout.preferredWidth: 125; font.pixelSize: Typography.body; color: Colors.textSecondary }
-                        Text { text: "单位"; Layout.preferredWidth: 74; font.pixelSize: Typography.body; color: Colors.textSecondary }
-                        Item { Layout.preferredWidth: 72 }
+
+            SettingsPanel {
+                id: standards
+                objectName: "settingsStandardsPanel"
+                title: "检查项目阈值"
+                readonly property real typeWidth: width < 550 ? 62 : 94
+                readonly property real limitWidth: width < 550 ? 65 : 98
+                readonly property real unitWidth: width < 550 ? 38 : 62
+                readonly property int actionWidth: 64
+                readonly property int columnGap: 6
+
+                function nameWidth(availableWidth) {
+                    return Math.max(0, availableWidth - typeWidth - 2 * limitWidth
+                                    - unitWidth - actionWidth - 5 * columnGap)
+                }
+
+                onVisibleChanged: if (visible) root.refreshThresholds()
+
+                Rectangle {
+                    Layout.fillWidth: true
+                    Layout.preferredHeight: 28
+                    color: Colors.panelAlt
+                    border.color: Colors.border
+                    Row {
+                        anchors.fill: parent
+                        anchors.leftMargin: 6
+                        anchors.rightMargin: 6
+                        spacing: standards.columnGap
+                        Label { width: standards.nameWidth(parent.width); height: parent.height; text: "检查项目"; verticalAlignment: Text.AlignVCenter; font.bold: true }
+                        Label { width: standards.typeWidth; height: parent.height; text: "方式"; verticalAlignment: Text.AlignVCenter }
+                        Label { width: standards.limitWidth; height: parent.height; text: "下限"; verticalAlignment: Text.AlignVCenter }
+                        Label { width: standards.limitWidth; height: parent.height; text: "上限"; verticalAlignment: Text.AlignVCenter }
+                        Label { width: standards.unitWidth; height: parent.height; text: "单位"; verticalAlignment: Text.AlignVCenter }
+                        Item { width: standards.actionWidth; height: parent.height }
                     }
+                }
+                Item {
+                    Layout.fillWidth: true
+                    Layout.fillHeight: true
                     ListView {
-                        Layout.fillWidth: true; Layout.fillHeight: true; clip: true; spacing: 4; model: root.thresholdItems
-                        ScrollBar.vertical: ScrollBar { }
+                        objectName: "settingsThresholdList"
+                        anchors.fill: parent
+                        clip: true
+                        model: root.thresholdItems
+                        ScrollBar.vertical: ScrollBar {}
                         delegate: Rectangle {
-                            width: ListView.view.width; height: 54; color: index % 2 ? Colors.panelAlt : Colors.panel
-                            RowLayout {
-                                anchors.fill: parent; anchors.margins: 6; spacing: 12
-                                Text { Layout.fillWidth: true; text: modelData.name; font.pixelSize: Typography.body; color: Colors.text; elide: Text.ElideRight }
-                                Text { Layout.preferredWidth: 100; text: modelData.type === "measure" ? "测量" : "目视检查"; font.pixelSize: Typography.body; color: Colors.textSecondary }
-                                FieldInput { Layout.preferredWidth: 125; height: 38; readOnly: modelData.type !== "measure"; inputMethodHints: Qt.ImhFormattedNumbersOnly; text: root.minValues[modelData.key] === undefined ? "" : String(root.minValues[modelData.key]); placeholder: "—"; onTextEdited: root.minValues[modelData.key] = value }
-                                FieldInput { Layout.preferredWidth: 125; height: 38; readOnly: modelData.type !== "measure"; inputMethodHints: Qt.ImhFormattedNumbersOnly; text: root.maxValues[modelData.key] === undefined ? "" : String(root.maxValues[modelData.key]); placeholder: "—"; onTextEdited: root.maxValues[modelData.key] = value }
-                                Text { Layout.preferredWidth: 74; text: modelData.unit || "—"; font.pixelSize: Typography.body; color: Colors.textSecondary }
-                                TouchButton { Layout.preferredWidth: 72; text: "保存"; height: 38; variant: "ghost"; onClicked: root.saveThreshold(modelData.key) }
+                            required property var modelData
+                            required property int index
+                            readonly property bool editable: modelData.type === "measure" && !!App.session.permissions.manage_assets
+                            width: ListView.view.width
+                            height: 36
+                            color: index % 2 ? Colors.panelAlt : Colors.panel
+                            Row {
+                                anchors.fill: parent
+                                anchors.leftMargin: 6
+                                anchors.rightMargin: 6
+                                spacing: standards.columnGap
+                                Label {
+                                    width: standards.nameWidth(parent.width); height: parent.height
+                                    text: modelData.name; verticalAlignment: Text.AlignVCenter; elide: Text.ElideRight
+                                }
+                                Label {
+                                    width: standards.typeWidth; height: parent.height
+                                    text: modelData.type === "measure" ? "测量" : "目视检查"
+                                    verticalAlignment: Text.AlignVCenter; color: Colors.textSecondary
+                                }
+                                FieldInput {
+                                    y: 4; width: standards.limitWidth; height: 28
+                                    readOnly: !editable
+                                    inputMethodHints: Qt.ImhFormattedNumbersOnly
+                                    text: String(root.minValues[modelData.key] ?? "")
+                                    placeholder: "—"
+                                    onTextEdited: function(value) { root.minValues[modelData.key] = value }
+                                }
+                                FieldInput {
+                                    y: 4; width: standards.limitWidth; height: 28
+                                    readOnly: !editable
+                                    inputMethodHints: Qt.ImhFormattedNumbersOnly
+                                    text: String(root.maxValues[modelData.key] ?? "")
+                                    placeholder: "—"
+                                    onTextEdited: function(value) { root.maxValues[modelData.key] = value }
+                                }
+                                Label {
+                                    width: standards.unitWidth; height: parent.height
+                                    text: modelData.unit || "—"; verticalAlignment: Text.AlignVCenter; elide: Text.ElideRight
+                                }
+                                TouchButton {
+                                    y: 4; width: standards.actionWidth; height: 28
+                                    text: "保存"
+                                    enabled: editable && !!root.templateId
+                                    onClicked: root.saveThreshold(modelData.key)
+                                }
                             }
                         }
                     }
-                    Text { Layout.fillWidth: true; text: root.thresholdMessage; visible: text.length > 0; font.pixelSize: Typography.body; color: Colors.info; wrapMode: Text.Wrap }
+                    Label {
+                        anchors.centerIn: parent
+                        visible: !root.thresholdItems.length
+                        text: "暂无检查项目"
+                        color: Colors.textSecondary
+                    }
                 }
+                Text { Layout.fillWidth: true; text: root.thresholdMessage; visible: text.length > 0; font.pixelSize: Typography.body; color: Colors.info; wrapMode: Text.Wrap }
             }
+
             UserManagementPage {}
 
-            ColumnLayout {
-                spacing:8
-                Flow{Layout.fillWidth:true;spacing:8
-                    TouchButton{text:"导出巡检记录";autoWidth:true;height:34;onClicked:root.exportCsv()}
-                    Text{height:34;verticalAlignment:Text.AlignVCenter;text:"待同步："+App.sync.pending+" 条";font.pixelSize:Typography.body;color:Colors.textSecondary}
-                    TouchButton{text:"立即同步";autoWidth:true;height:34;enabled:App.sync.configured&&App.sync.online&&App.session.permissions.settings;onClicked:root.flushSync()}
-                    TouchButton{text:App.sync.online?"暂停同步":"允许同步";autoWidth:true;height:34;variant:"ghost";enabled:App.sync.configured&&App.session.permissions.settings;onClicked:App.sync.online=!App.sync.online}
+            SettingsPanel {
+                objectName: "settingsMaintenancePanel"
+                ProductPage {
+                    id: maintenance
+                    objectName: "settingsDataManagement"
+                    embedded: true
+                    showHeading: false
+                    Layout.fillWidth: true
+                    Layout.fillHeight: true
+                    Component.onCompleted: setup({section:"data"})
                 }
-                Text{Layout.fillWidth:true;text:root.storageMessage||root.syncMessage||App.sync.status;visible:text.length>0;wrapMode:Text.Wrap;font.pixelSize:Typography.body;color:Colors.textSecondary}
-                ProductPage{id:dataMaintenance;objectName:"settingsDataManagement";embedded:true;showHeading:false;Layout.fillWidth:true;Layout.fillHeight:true;Component.onCompleted:Qt.callLater(function(){setup({section:"data"})})}
             }
-            ProductPage{id:runtimeMaintenance;objectName:"settingsRuntimeMaintenance";embedded:true;showHeading:false;Component.onCompleted:Qt.callLater(function(){setup({section:"maintenance"})})}
-            RuntimeStatusPanel { objectName: "devicePerformancePanel" }
-
         }
     }
 }

@@ -121,14 +121,13 @@ MenuBar {
         MenuItem { text: "模型服务诊断"; onTriggered: bar.workbench.rk1828() }
         MenuItem { text: "模型管理"; onTriggered: App.nav.push("ai", {mode:"text",open_models:true}) }
         MenuItem { text: "操作日志"; onTriggered: bar.workbench.showOutput() }
-        MenuItem { text: "系统设置"; onTriggered: App.nav.push("settings") }
+        MenuItem { text: "设置"; onTriggered: App.nav.push("settings") }
         MenuSeparator {}
         MenuItem { text: "打开兼容热像工具"; onTriggered: App.nav.push("legacyThermal") }
     }
     Menu {
         title: "设备信息(&N)"
-        MenuItem { text: "板端性能与资源"; onTriggered: App.nav.push("settings", {section:"deviceInfo"}) }
-        MenuItem { text: "外设与连接"; onTriggered: App.nav.push("settings", {section:"hardware"}) }
+        MenuItem { text: "设备连接与性能"; onTriggered: App.nav.push("settings", {section:"hardware"}) }
     }
     Menu {
         title: "帮助(&H)"

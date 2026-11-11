@@ -4,52 +4,95 @@ import QtQuick.Layouts
 import "../theme"
 import "../components"
 
-Rectangle {
-    id:root;objectName:"userManagementPage";color:Colors.background
+Item {
+    id: root
+    objectName: "userManagementPage"
     property var rows:[]
     property string query:""
     property string message:""
     property var selected:({})
     property var roleKeys:["inspector","supervisor","admin"]
     property var roleNames:["巡检员","主管","系统管理员"]
-    function refresh(){rows=App.session.users()}
+    function refresh() {
+        rows = App.session.users()
+        selected = rows.find(row => row.id === selected.id) || ({})
+    }
     function edit(row){selected=row||{};username.text=selected.name||"";password.text="";roleChoice.currentIndex=Math.max(0,roleKeys.indexOf(selected.role||"inspector"));activeBox.checked=selected.active===undefined?true:!!selected.active;message="";editor.visible=true}
     function save(){var r=App.session.saveUser(selected.id||"",username.text,roleKeys[roleChoice.currentIndex],activeBox.checked,password.text);if(r.ok){editor.visible=false;password.text="";message="用户已保存";refresh()}else message=r.error}
     onVisibleChanged:if(visible)refresh()
     Connections{target:App.session;function onUsersChanged(){root.refresh()}}
-    ColumnLayout {
-        anchors.fill:parent;anchors.margins:14;spacing:12
-        RowLayout{Layout.fillWidth:true
-            Text{text:"用户管理";font.pixelSize:Typography.title;font.weight:Font.DemiBold;color:Colors.text}
-            Item{Layout.fillWidth:true}
-            Text{text:App.session.userName+" · "+App.session.roleText();font.pixelSize:Typography.body;color:Colors.textSecondary}
-            TouchButton{text:"退出登录";autoWidth:true;height:32;variant:"ghost";onClicked:App.session.logout()}
-            TouchButton{objectName:"newUserButton";text:"新增用户";autoWidth:true;height:32;variant:"primary";enabled:App.session.role==="admin";onClicked:root.edit({})}
-        }
-        FieldInput{Layout.fillWidth:true;height:36;placeholder:"搜索用户名或角色";onTextEdited:function(value){root.query=value}}
-        Text{Layout.fillWidth:true;visible:root.message.length>0;text:root.message;color:Colors.textSecondary;wrapMode:Text.Wrap;font.pixelSize:Typography.body}
-        Text{visible:App.session.role!=="admin";text:"仅管理员可新增、编辑、停用和删除用户。";font.pixelSize:Typography.body;color:Colors.textSecondary}
-        ScrollView {
-            id:userScroll;Layout.fillWidth:true;Layout.fillHeight:true;contentWidth:availableWidth;clip:true
-            ColumnLayout {
-                width:userScroll.availableWidth;spacing:8
-                Repeater{model:root.rows
-                    Rectangle {
-                        property var entry:modelData
-                        visible:!root.query||entry.name.indexOf(root.query)>=0||root.roleNames[Math.max(0,root.roleKeys.indexOf(entry.role))].indexOf(root.query)>=0
-                        Layout.fillWidth:true;Layout.preferredHeight:78;color:Colors.panel;radius:12;border.color:Colors.border
-                        RowLayout{anchors.fill:parent;anchors.margins:12;spacing:12
-                            Rectangle{width:38;height:38;radius:12;color:Colors.infoDark;Text{anchors.centerIn:parent;text:entry.name.slice(0,1);font.pixelSize:18;color:Colors.normal}}
-                            ColumnLayout{Layout.fillWidth:true;spacing:4
-                                Text{Layout.fillWidth:true;text:entry.name+(entry.name===App.session.userName?"（当前）":"");font.pixelSize:Typography.body;font.weight:Font.DemiBold;color:Colors.text;elide:Text.ElideRight}
-                                Text{Layout.fillWidth:true;text:root.roleNames[Math.max(0,root.roleKeys.indexOf(entry.role))]+" · "+(entry.configured?"已设置密码":"待设置密码");font.pixelSize:Typography.body;color:Colors.textSecondary;elide:Text.ElideRight}
-                            }
-                            StatusBadge{text:entry.active?"启用":"停用";status:entry.active?"normal":"pending"}
-                            TouchButton{text:"编辑";width:60;height:32;variant:"ghost";enabled:App.session.role==="admin";onClicked:root.edit(entry)}
-                            TouchButton{text:"删除";width:60;height:32;variant:"ghost";enabled:App.session.role==="admin"&&entry.name!==App.session.userName;onClicked:{root.selected=entry;confirm.openDialog()}}
-                        }
-                    }
+    readonly property var visibleRows: rows.map(function(row) {
+        const role = root.roleNames[Math.max(0, root.roleKeys.indexOf(row.role))]
+        return Object.assign({}, row, {roleLabel:role, displayName:row.name + (row.name === App.session.userName ? "（当前）" : ""),
+                                      state:row.active ? "启用" : "停用", credential:row.configured ? "已设置密码" : "待设置密码"})
+    }).filter(row => !root.query || row.name.toLowerCase().includes(root.query.toLowerCase()) || row.roleLabel.includes(root.query))
+
+    SettingsPanel {
+        anchors.fill: parent
+        title: "账号与角色"
+
+        Item {
+            Layout.fillWidth: true
+            Layout.fillHeight: true
+            Flow {
+                id: userTools
+                anchors.left: parent.left
+                anchors.right: parent.right
+                anchors.top: parent.top
+                height: implicitHeight
+                spacing: 6
+                FieldInput {
+                    width: Math.min(220, Math.max(130, parent.width - 300))
+                    height: 30
+                    placeholder: "搜索用户名或角色"
+                    text: root.query
+                    onTextEdited: function(value) { root.query = value }
                 }
+                TouchButton {
+                    objectName: "newUserButton"
+                    text: "新增用户"; autoWidth: true; variant: "primary"
+                    enabled: App.session.role === "admin"
+                    onClicked: root.edit({})
+                }
+                TouchButton {
+                    text: "编辑"; autoWidth: true
+                    enabled: App.session.role === "admin" && !!root.selected.id
+                    onClicked: root.edit(root.selected)
+                }
+                TouchButton {
+                    text: "删除"; autoWidth: true
+                    enabled: App.session.role === "admin" && !!root.selected.id && root.selected.name !== App.session.userName
+                    onClicked: confirm.openDialog()
+                }
+                TouchButton { text: "退出登录"; autoWidth: true; onClicked: App.session.logout() }
+            }
+            Label {
+                id: userMessage
+                anchors.left: parent.left
+                anchors.right: parent.right
+                anchors.top: userTools.bottom
+                anchors.topMargin: 6
+                visible: !!text
+                text: root.message || (App.session.role === "admin" ? "" : "仅管理员可管理用户。")
+                color: Colors.textSecondary
+                wrapMode: Text.Wrap
+            }
+            DataTable {
+                objectName: "settingsUserTable"
+                spreadsheet: true
+                anchors.left: parent.left
+                anchors.right: parent.right
+                anchors.top: userMessage.visible ? userMessage.bottom : userTools.bottom
+                anchors.topMargin: 6
+                anchors.bottom: parent.bottom
+                rowHeight: 30
+                items: root.visibleRows
+                selectedIndex: items.findIndex(row => row.id === root.selected.id)
+                emptyText: root.query ? "没有匹配的用户" : "暂无用户"
+                columns: [{key:"displayName",title:"用户名",width:0}, {key:"roleLabel",title:"角色",width:115},
+                          {key:"state",title:"账户状态",width:85}, {key:"credential",title:"登录凭据",width:110}]
+                onRowClicked: function(index, row) { root.selected = row }
+                onRowDoubleClicked: function(index, row) { if (App.session.role === "admin") root.edit(row) }
             }
         }
     }
@@ -58,9 +101,9 @@ Rectangle {
         id:editor;objectName:"userEditor";anchors.fill:parent;z:50;visible:false;color:"#880D152B"
         MouseArea{anchors.fill:parent}
         Rectangle {
-            anchors.centerIn:parent;width:Math.min(480,parent.width-24);height:Math.min(500,parent.height-24);radius:16;color:Colors.panel
-            ColumnLayout{anchors.fill:parent;anchors.margins:20;spacing:12
-                Text{text:root.selected.id?"编辑用户":"新增用户";font.pixelSize:Typography.title;font.weight:Font.DemiBold;color:Colors.text}
+            anchors.centerIn:parent;width:Math.min(480,parent.width-24);height:Math.min(500,parent.height-24);color:Colors.panel;border.color:Colors.border
+            ColumnLayout{anchors.fill:parent;anchors.margins:10;spacing:8
+                Text{text:root.selected.id?"编辑用户":"新增用户";font.pixelSize:Typography.h2;font.weight:Font.DemiBold;color:Colors.text}
                 ScrollView{id:editScroll;Layout.fillWidth:true;Layout.fillHeight:true;contentWidth:availableWidth;clip:true
                     ColumnLayout{width:editScroll.availableWidth;spacing:14
                         Text{text:"用户名";font.pixelSize:Typography.body;color:Colors.text}

@@ -69,6 +69,7 @@
     <file>qml/components/BoardFilePicker.qml</file>
     <file>qml/components/ConversationPicker.qml</file>
     <file>qml/components/RuntimeStatusPanel.qml</file>
+    <file>qml/components/SettingsPanel.qml</file>
     <file>qml/components/HardwareConnectionsPane.qml</file>
     <file>qml/components/NewInspectionWindow.qml</file>
     <file>qml/components/DeviceEditorWindow.qml</file>
