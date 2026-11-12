@@ -139,8 +139,16 @@ QString evidenceReportHtml(const QVariantMap &snapshot, const QString &templateI
             block += QStringLiteral("<p>归档时状态　%1</p>").arg(value("defectStatus"));
         return block;
     };
+    const auto timeline = snapshot.value("timeline").toList();
     auto finding = snapshot.value("finding").toString().trimmed();
     finding.remove(QStringLiteral("**"));
+    finding.remove(QLatin1Char(0x60));
+    finding.replace(QStringLiteral("mean_luma_255"), QObject::tr("平均亮度"));
+    for (qsizetype i = 0; i < timeline.size(); ++i) {
+        const auto evidenceId = timeline[i].toMap().value("id").toString();
+        if (!evidenceId.isEmpty())
+            finding.replace(evidenceId, QObject::tr("证据 %1").arg(i+1, 2, 10, QLatin1Char('0')));
+    }
     finding.remove(QRegularExpression(QStringLiteral("^\\s*判定\\s*[:：].*?(?:\\r?\\n|$)")));
     finding.replace(QRegularExpression(QStringLiteral("(?m)^#{1,6}\\s*")), QString());
     finding.replace(QRegularExpression(QStringLiteral("(?m)^\\s*[-*]\\s+")), QStringLiteral("• "));
@@ -151,10 +159,12 @@ QString evidenceReportHtml(const QVariantMap &snapshot, const QString &templateI
     }
     html += heading(QObject::tr("事件结论"));
     html += QStringLiteral("<p>判定依据　%1</p>").arg(value("basis"));
-    if (finding.isEmpty())
+    if (brief)
+        html += QObject::tr("<p>本事件归档 %1 条对齐证据。完整观测与模型建议见多模态证据报告。</p>").arg(timeline.size());
+    else if (finding.isEmpty())
         html += QObject::tr("<p>已归档关联证据与读数。暂无模型分析建议。</p>");
     else
-        html += QStringLiteral("<p>模型建议（%1）</p><p>%2</p>")
+        html += QStringLiteral("<p>模型建议（%1 · 待核验）</p><p>%2</p>")
             .arg(value("model"), finding.toHtmlEscaped().replace('\n',"<br>"));
     const auto readings = snapshot.value("readings").toList();
     if (!readings.isEmpty() && !brief) {
@@ -169,9 +179,8 @@ QString evidenceReportHtml(const QVariantMap &snapshot, const QString &templateI
         }
         html += "</table>";
     }
-    if (followUp)
+    if (followUp || brief)
         html += rectification();
-    const auto timeline = snapshot.value("timeline").toList();
     html += heading(QObject::tr("对齐证据"));
     html += QObject::tr("<p>时间以事件基准为零点。时间偏移用于关联检索，文件时间仅供参考。</p>");
     html += QStringLiteral("<table width='100%' cellspacing='0' cellpadding='5' border='1' style='border-color:#c8d4dc'>"
@@ -181,14 +190,17 @@ QString evidenceReportHtml(const QVariantMap &snapshot, const QString &templateI
     for (const auto &value : timeline) {
         const auto item = value.toMap();
         const auto label = [&](const char *key) { return item.value(key).toString().toHtmlEscaped(); };
-        html += QStringLiteral("<tr bgcolor='%1'><td>%2</td><td>%3<br>%4<br><span style='color:#536b7e'>%5</span></td>"
+        ++index;
+        html += QStringLiteral("<tr bgcolor='%1'><td>%2</td><td>%3 <span style='color:#536b7e'>%5</span><br>%4</td>"
                                "<td><b>%6</b>%7</td></tr>")
-            .arg(++index % 2 ? "#ffffff" : "#f3f6f8",label("modality"),label("offsetLabel"),
-                 label("timeUtc").replace("T"," ").remove("Z"),label("clockLabel"),label("title"),
+            .arg(index % 2 ? "#ffffff" : "#f3f6f8",
+                 QStringLiteral("%1  %2").arg(index, 2, 10, QLatin1Char('0')).arg(label("modality")),
+                 label("offsetLabel"), label("timeUtc").replace("T"," ").remove("Z"),
+                 brief ? QString() : label("clockLabel"), label("title"),
                  brief ? QString() : "<br>" + observationLabel(item).toHtmlEscaped());
     }
     html += "</table>";
-    if (!followUp)
+    if (!followUp && !brief)
         html += rectification();
     html += "</body></html>";
     return html;
@@ -1453,14 +1465,41 @@ QVariantMap ProjectWorkspace::exportReport(const QString &eventId)
         valid("manual") ? tr("现场登记") : valid("rule") ? tr("巡检读数与判定规则") : tr("现有证据不足");
     QVariantList readings;
     if (!recordId.isEmpty() && access.record(recordId)) {
+        QMap<QPair<QString, QString>, QString> baselineLimits;
+        QSqlQuery observedReadings(business_->connection());
+        observedReadings.prepare("SELECT e.metadata FROM product_evidence e JOIN measurement_points p ON p.id=e.point_id "
+                                 "WHERE e.record_id=? AND p.name=? AND e.kind='reading' AND e.deleted_at='' ORDER BY e.rowid");
+        observedReadings.addBindValue(recordId);
+        observedReadings.addBindValue(first.value("point"));
+        if (observedReadings.exec()) {
+            while (observedReadings.next()) {
+                const auto data = QJsonDocument::fromJson(observedReadings.value(0).toByteArray()).toVariant().toMap();
+                const auto id = data.value("assessment").toMap().value("baseline_id").toString();
+                if (id.isEmpty())
+                    continue;
+                QSqlQuery baseline(business_->connection());
+                baseline.prepare("SELECT minimum,maximum FROM health_baselines WHERE id=?");
+                baseline.addBindValue(id);
+                if (!baseline.exec() || !baseline.next())
+                    continue;
+                const auto low = baseline.value(0), high = baseline.value(1);
+                const auto range = low.isNull() ? QStringLiteral("≤ %1").arg(high.toString())
+                    : high.isNull() ? QStringLiteral("≥ %1").arg(low.toString())
+                    : QStringLiteral("%1 – %2").arg(low.toString(),high.toString());
+                baselineLimits[{data.value("metric").toString(), data.value("value").toString()}] =
+                    range + " " + data.value("unit").toString();
+            }
+        }
         QSqlQuery checks(business_->connection());
         checks.prepare("SELECT item_name,value_text,unit,threshold_text,result FROM inspection_check_items "
                        "WHERE record_id=? AND result<>'' ORDER BY rowid LIMIT 24");
         checks.addBindValue(recordId);
         if (checks.exec()) {
             while (checks.next()) {
+                const auto standard = checks.value(3).toString().trimmed();
                 readings.append(QVariantMap{{"name",checks.value(0)},{"value",checks.value(1)},
-                    {"unit",checks.value(2)},{"threshold",checks.value(3)},
+                    {"unit",checks.value(2)},{"threshold",standard.isEmpty() ?
+                        baselineLimits.value({checks.value(0).toString(),checks.value(1).toString()}, tr("—")) : standard},
                     {"result",classificationLabel(checks.value(4).toString())}});
             }
         }

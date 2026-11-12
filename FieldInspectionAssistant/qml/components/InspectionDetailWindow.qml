@@ -15,6 +15,10 @@ Window{
     property string pendingImage:""
     property var selectedEntry:({})
     AnalysisReviewDialog { id: inspectionReview }
+    readonly property var selectedDefect: detailData.selected_defect || ({})
+    readonly property string defectStateLabel: selectedDefect.returned ? "退回整改"
+        : ({unassigned:"待分派",pending:"待开始",in_progress:"整改中",
+            review:"待复核",reopened:"退回整改",closed:"已关闭"})[selectedDefect.status] || ""
     readonly property var projectEvents: App.projects.events.filter(row =>
         !!row.record_id && row.record_id === (detailData.record || {}).id)
     onClosing:{entryEditor.visible=false;imagePicker.close();imagePreview.close();if(App.input.targetWindow===win)App.input.cancel()}
@@ -40,11 +44,16 @@ Window{
     ColumnLayout{anchors.fill:parent;anchors.margins:16;spacing:10
         RowLayout{Layout.fillWidth:true
             Text{Layout.fillWidth:true;text:(win.detailData.asset||{}).name||"巡检记录";font.pixelSize:Typography.title;font.weight:Font.DemiBold;color:Colors.text;elide:Text.ElideRight}
-            Text{text:win.detailData.state_text||"待完成";font.pixelSize:Typography.body;color:win.detailData.state==="completed"?Colors.success:Colors.normal}
+            Text {
+                text: win.kind === "defects" ? win.defectStateLabel : (win.detailData.state_text || "待完成")
+                font.pixelSize: Typography.body
+                color: (win.kind === "defects" ? win.selectedDefect.status === "closed" :
+                        win.detailData.state === "completed") ? Colors.success : Colors.normal
+            }
         }
         Text{Layout.fillWidth:true;text:((win.detailData.task||{}).task_code||"")+"  "+((win.detailData.task||{}).name||"");font.pixelSize:Typography.body;color:Colors.textSecondary;elide:Text.ElideRight}
         InspectionFlow {
-            Layout.fillWidth:true; Layout.preferredHeight:102
+            Layout.fillWidth:true; Layout.preferredHeight:implicitHeight
             steps: win.detailData.flow || []
             defectMode: win.kind === "defects"
             defect: win.detailData.selected_defect || ({})
