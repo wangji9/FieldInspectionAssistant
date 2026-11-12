@@ -152,10 +152,10 @@ Rectangle {
             objectName:"analysisMainNavigation";Layout.fillWidth:true;Layout.preferredHeight:36
         Flickable {anchors.left:parent.left;anchors.right:parent.right;anchors.rightMargin:68;height:36;contentWidth:navigationRow.width;clip:true;boundsBehavior:Flickable.StopAtBounds
             Row {id:navigationRow;height:36;spacing:4
-                Repeater {model:["采集通道","信号分析","趋势","声学评估","录音管理"]
+                Repeater {model:["采集通道","信号分析","趋势","声学评估","录音管理","声纹识别","声学成像"]
                     TouchButton{objectName:"analysisTab"+index;text:modelData;autoWidth:true;height:28;variant:root.tab===index?"tonal":"secondary";onClicked:root.tab=index}
                 }
-                TouchButton{objectName:"startSensorCapture";text:App.analysis.running?"停止并保存":"开始采集";autoWidth:true;height:28;variant:App.analysis.running?"danger":"primary";enabled:App.analysis.running||(!App.evaluation.busy&&root.selectedSource.length>0);onClicked:root.toggleCapture()}
+                TouchButton{objectName:"startSensorCapture";visible:root.tab!==6;text:App.analysis.running?"停止并保存":"开始采集";autoWidth:true;height:28;variant:App.analysis.running?"danger":"primary";enabled:App.analysis.running||(!App.evaluation.busy&&root.selectedSource.length>0);onClicked:root.toggleCapture()}
                 TouchButton { text:"录音归入工程"; autoWidth:true; height:32
                     visible: root.tab === 0
                     enabled: !!root.latestProjectRecording && !!App.projects.project.id && !App.analysis.running && !App.speech.recording
@@ -164,7 +164,7 @@ Rectangle {
                 TouchButton{visible:root.selectedCharts.length>0&&root.tab<3;text:"已选 "+root.selectedCharts.length;autoWidth:true;height:32;onClicked:chartPicker.open()}
             }}
             TouchButton {
-                objectName:"analysisSettingsButton";anchors.right:parent.right;width:62;text:"设置"
+                objectName:"analysisSettingsButton";anchors.right:parent.right;width:62;text:"设置"; visible:root.tab<5
                 onClicked:root.openSettings()
             }
         }
@@ -265,7 +265,10 @@ Rectangle {
             RecordingManager {
                 onImportRequested:root.importRecording()
                 onAnalyzeRequested:root.tab=1
+                onSpeakerRequested: function(path, name) { speakerPane.useRecording(path, name); root.tab=5 }
             }
+            SpeakerRecognitionPane { id:speakerPane; latestRecording:root.latestProjectRecording }
+            AcousticImagingPane {}
         }
     }
     property string feedback: ""

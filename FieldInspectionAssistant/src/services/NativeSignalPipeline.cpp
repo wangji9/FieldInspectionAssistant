@@ -114,8 +114,11 @@ NativeAudioCapture::NativeAudioCapture(const QVariantMap&device,const QString&fo
 }
 NativeAudioCapture::~NativeAudioCapture(){requestInterruption();wait(3000);}
 QVariantMap NativeAudioCapture::info()const{QMutexLocker lock(&mutex_);return {{"id",id_},{"path",path_},{"source",device_["name"]},{"fs",rate_},{"channels",channels_},{"started",started_},{"duration",double(frames_.load())/rate_},{"frames",QVariant::fromValue(frames_.load())},{"has_signal",hasSignal_.load()},{"finalized",finalized_.load()},{"xruns",QVariant::fromValue(xruns_.load())},{"packets",QVariant::fromValue(packets_.load())},{"checksum_errors",QVariant::fromValue(checksumErrors_.load())},{"transport",device_.value("transport","alsa")},{"error",error_},{"origin","sensor"}};}
-QByteArray NativeAudioCapture::latestPcm(double seconds)const{
-    QMutexLocker lock(&mutex_);quint64 size=qMin(available_,quint64(rate_*channels_*seconds));size-=size%channels_;QByteArray result(size*2,Qt::Uninitialized);
+QByteArray NativeAudioCapture::latestPcm(double seconds, quint64 *endFrame, qint64 *receivedMs)const{
+    QMutexLocker lock(&mutex_);
+    if(endFrame)*endFrame=frames_.load();
+    if(receivedMs)*receivedMs=receivedMs_;
+    quint64 size=qMin(available_,quint64(rate_*channels_*seconds));size-=size%channels_;QByteArray result(size*2,Qt::Uninitialized);
     quint64 start=(write_+ring_.size()-size)%ring_.size(),first=qMin(size,quint64(ring_.size())-start);std::memcpy(result.data(),ring_.constData()+start,first*2);if(first<size)std::memcpy(result.data()+first*2,ring_.constData(),(size-first)*2);return result;
 }
 QVector<double> NativeAudioCapture::latest(double seconds,int channel)const{auto pcm=latestPcm(seconds);QVector<double> out(pcm.size()/2/channels_);const auto *data=reinterpret_cast<const qint16*>(pcm.constData());channel=qBound(0,channel,channels_-1);for(int i=0;i<out.size();i++)out[i]=qFromLittleEndian<qint16>(data+i*channels_+channel)/32768.;return out;}
@@ -161,8 +164,10 @@ bool NativeAudioCapture::appendPcm(QFile&file,const char *data,int bytes){
     if(file.pos()-44+bytes>MaxWavData){QMutexLocker lock(&mutex_);error_="已达到单个 WAV 文件的容量上限";return false;}
     if(file.write(data,bytes)!=bytes){QMutexLocker lock(&mutex_);error_="录音写入失败";return false;}
     if(!hasSignal_ && std::any_of(data,data+bytes,[](char value){return value!=0;}))hasSignal_=true;
-    {QMutexLocker lock(&mutex_);quint64 first=qMin(quint64(samples),quint64(ring_.size())-write_);std::memcpy(ring_.data()+write_,data,first*2);if(first<quint64(samples))std::memcpy(ring_.data(),data+first*2,(samples-first)*2);write_=(write_+samples)%ring_.size();available_=qMin(quint64(ring_.size()),available_+samples);}
-    frames_+=bytes/(channels_*2);sequence_++;return true;
+    {QMutexLocker lock(&mutex_);quint64 first=qMin(quint64(samples),quint64(ring_.size())-write_);std::memcpy(ring_.data()+write_,data,first*2);if(first<quint64(samples))std::memcpy(ring_.data(),data+first*2,(samples-first)*2);write_=(write_+samples)%ring_.size();available_=qMin(quint64(ring_.size()),available_+samples);
+        frames_+=bytes/(channels_*2);
+        receivedMs_=QDateTime::currentMSecsSinceEpoch();}
+    sequence_++;return true;
 }
 void NativeAudioCapture::runSerial(){
     auto fail=[this](const QString&e){QMutexLocker lock(&mutex_);error_=e;};

@@ -46,6 +46,7 @@ qt_add_executable(field_inspection_assistant
     src/services/WebSearchService.h src/services/WebSearchService.cpp
     src/services/ConversationExportService.h src/services/ConversationExportService.cpp
     src/services/SpeechService.h src/services/SpeechService.cpp
+    src/services/SpeakerRecognitionService.h src/services/SpeakerRecognitionService.cpp
     src/services/DictationService.h src/services/DictationService.cpp
     src/services/SignalAnalysisService.h src/services/SignalAnalysisService.cpp
     src/services/NativeSignalPipeline.h src/services/NativeSignalPipeline.cpp
@@ -64,6 +65,9 @@ qt_add_executable(field_inspection_assistant
     src/services/SystemContextService.h src/services/SystemContextService.cpp
     src/services/VoiceAssistantService.h src/services/VoiceAssistantService.cpp
     src/services/AcousticEvaluationService.h src/services/AcousticEvaluationService.cpp
+    src/services/AcousticImagingEngine.h src/services/AcousticImagingEngine.cpp
+    src/services/AcousticImagingService.h src/services/AcousticImagingService.cpp
+    src/ui/AcousticPlots.h src/ui/AcousticPlots.cpp
     src/services/AcousticReportRenderer.h src/services/AcousticReportRenderer.cpp
     src/services/ChartTransferService.h src/services/ChartTransferService.cpp
     src/services/AgentService.h src/services/AgentService.cpp
@@ -107,4 +111,7 @@ if(FIELDOPS_VOICE_TESTS)
     add_executable(voice_input_test tests/voice_input_test.cpp src/services/NativeVoiceInput.cpp src/services/NativeVoiceInput.h src/services/NativeSignalPipeline.cpp src/services/NativeSignalPipeline.h)
     target_link_libraries(voice_input_test PRIVATE Qt6::Core PkgConfig::FIELDOPS_ALSA PkgConfig::FIELDOPS_FFTW fvad)
     add_test(NAME voice_input COMMAND voice_input_test)
+    add_executable(acoustic_imaging_test tests/acoustic_imaging_test.cpp src/services/AcousticImagingEngine.cpp)
+    target_link_libraries(acoustic_imaging_test PRIVATE Qt6::Core Qt6::Gui opencv_core)
+    add_test(NAME acoustic_imaging COMMAND acoustic_imaging_test)
 endif()

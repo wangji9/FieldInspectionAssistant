@@ -300,3 +300,7 @@ XDG_DATA_HOME="$demo/data" XDG_CONFIG_HOME="$demo/config" QT_QPA_PLATFORM=offscr
 ```
 
 演示生成脚本依赖 `python3-pil`、FFmpeg 和板端推理服务。验收日志与截图位于 `$demo/work/audit/`，工程归档及三种 PDF 位于 `$demo/work/exports/`。正式签审流程仍由巡检管理处理，事件报告可直接归档并按模板导出。
+
+### 声纹与声学成像
+
+声音与信号模块支持 [声纹档案、时间轴和固定语种转写](docs/speaker-recognition.md)，以及 [六麦阵列声学成像与摄像头标定](docs/acoustic-imaging.md)。

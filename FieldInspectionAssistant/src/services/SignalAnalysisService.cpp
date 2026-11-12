@@ -27,6 +27,20 @@ void SignalAnalysisService::refreshDevices(bool withData){
           {QStringLiteral("/home/ztl/FieldInspectionAssistant/deploy/sensor_analysis.py"),QStringLiteral("--data"),folder_});
     }else if(worker_.state()==QProcess::Running)send({{"op","devices"},{"with_data",withData}});
 }
+SixChannelAudioWindow SignalAnalysisService::sixChannelWindow(double seconds) const
+{
+    if (!capture_ || capture_->channels() != 6 || capture_->rate() != 16000)
+        return {};
+    const auto info = capture_->info();
+    if (info.value("transport") != "six_serial")
+        return {};
+    SixChannelAudioWindow result;
+    result.captureId = info.value("id").toString();
+    result.sampleRate = capture_->rate();
+    result.pcm = capture_->latestPcm(qBound(.128, seconds, 4.0), &result.endFrame, &result.receivedMs);
+    return result;
+}
+
 QVariantMap SignalAnalysisService::summary()const{
     QVariantMap result;for(const auto *key:{"rate","channels","channel","unit","time","recording","source","full_duration","analysis_scope","analysis_start","analysis_end","native","capture_frames","checksum_errors","transport","calibration"})if(snapshot_.contains(key))result[key]=snapshot_[key];
     auto plot=snapshot_.value("plot").toMap();result["has_plot"]=!plot.isEmpty();result["has_envelope"]=plot.contains("envelope");return result;
@@ -39,6 +53,10 @@ void SignalAnalysisService::start(const QString &source){
     if(reportGuard_&&reportGuard_()){message_=QStringLiteral("请先结束语音对话或声学评价报告，再开始采集");emit changed();return;}
     if(!session_->can("inspect")||capture_||recordingBusy_||exportBusy())return;
     QVariantMap device;for(auto v:devices_)if(v.toMap()["id"].toString()==source)device=v.toMap();
+    if (device.isEmpty() && source == "ListenGo_raw_six" && QFileInfo::exists("/dev/lg_speech_serial") &&
+        QFileInfo::exists("/dev/lg_speech_uac"))
+        device={{"id",source},{"name","六麦原始采集"},{"transport","six_serial"},{"rate",16000},{"channels",6},
+                {"control","/dev/lg_speech_serial"},{"audio","/dev/lg_speech_uac"}};
     if(device.isEmpty()){message_=QStringLiteral("请刷新并选择真实采集设备");emit changed();return;}
     snapshot_.clear();emit snapshotChanged();
     captureGeneration_++;featurePending_=false;capture_=new NativeAudioCapture(device,folder_,this);

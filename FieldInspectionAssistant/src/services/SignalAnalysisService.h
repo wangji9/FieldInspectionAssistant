@@ -3,6 +3,14 @@
 #include <functional>
 class SessionManager;class DatabaseManager;class RecordingCatalog;
 class NativeAudioCapture;class NativeSignalAnalyzer;
+struct SixChannelAudioWindow {
+    QByteArray pcm;
+    QString captureId;
+    quint64 endFrame = 0;
+    qint64 receivedMs = 0;
+    int sampleRate = 0;
+};
+
 class SignalAnalysisService final: public QObject {
     Q_OBJECT
     Q_PROPERTY(QVariantList devices READ devices NOTIFY changed)
@@ -21,6 +29,7 @@ class SignalAnalysisService final: public QObject {
     Q_PROPERTY(QString deviceStatus READ deviceStatus NOTIFY changed)
     Q_PROPERTY(bool running READ running NOTIFY changed)
 public:
+    SixChannelAudioWindow sixChannelWindow(double seconds) const;
     SignalAnalysisService(DatabaseManager *db,SessionManager *session,const QString &folder,QObject *parent=nullptr);
     ~SignalAnalysisService() override;
     void setReportGuard(std::function<bool()> guard){reportGuard_=guard;}

@@ -93,6 +93,8 @@ MenuBar {
         title: "采集(&C)"
         MenuItem { text: "视频与图像"; onTriggered: App.nav.push("camera") }
         MenuItem { text: "声音与信号"; onTriggered: bar.workbench.navigateSubsection("analysis") }
+        MenuItem { text: "声纹识别"; onTriggered: App.nav.push("analysis", {analysis_tab:5}) }
+        MenuItem { text: "声学成像"; onTriggered: App.nav.push("analysis", {analysis_tab:6}) }
         MenuItem { text: "热像采集与分析"; onTriggered: App.nav.push("thermal") }
         MenuSeparator {}
         MenuItem { text: "停止当前采集"; enabled: bar.workbench.canStopCapture; onTriggered: bar.workbench.stopCapture() }

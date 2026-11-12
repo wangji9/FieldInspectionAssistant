@@ -10,7 +10,7 @@ public:
     NativeAudioCapture(const QVariantMap &device,const QString &folder,QObject *parent=nullptr);
     ~NativeAudioCapture() override;
     QVector<double> latest(double seconds,int channel)const;
-    QByteArray latestPcm(double seconds)const;
+    QByteArray latestPcm(double seconds, quint64 *endFrame = nullptr, qint64 *receivedMs = nullptr)const;
     QVariantMap info()const;
     quint64 sequence()const{return sequence_.load();}
     int rate()const{return rate_;}int channels()const{return channels_;}
@@ -19,7 +19,7 @@ private:
     void runSerial();
     bool appendPcm(QFile &file,const char *data,int bytes);
     QVariantMap device_;QString path_,id_,error_;int rate_,channels_;
-    mutable QMutex mutex_;QVector<qint16> ring_;quint64 write_=0,available_=0;
+    mutable QMutex mutex_;QVector<qint16> ring_;quint64 write_=0,available_=0;qint64 receivedMs_=0;
     std::atomic<quint64>sequence_{0},frames_{0},xruns_{0};double started_=0;
     std::atomic<quint64>packets_{0},checksumErrors_{0};
     std::atomic_bool hasSignal_{false};

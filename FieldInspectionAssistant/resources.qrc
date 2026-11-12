@@ -7,6 +7,9 @@
     <file>migrations/project_v1.sql</file>
     <file>qml/Main.qml</file>
     <file>qml/components/VoiceAssistantPane.qml</file>
+    <file>qml/components/SpeakerRecognitionPane.qml</file>
+    <file>qml/components/SpeakerTimeline.qml</file>
+    <file>qml/components/AcousticImagingPane.qml</file>
     <file>qml/components/SystemSources.qml</file>
     <file>qml/components/EvaluationAnalysisPane.qml</file>
     <file>qml/theme/qmldir</file>

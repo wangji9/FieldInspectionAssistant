@@ -1,6 +1,7 @@
 #pragma once
 #include "../services/HardwareStatusService.h"
 #include "../services/AcousticEvaluationService.h"
+#include "../services/AcousticImagingService.h"
 #include "../services/VoiceAssistantService.h"
 #include "../services/SystemContextService.h"
 
@@ -21,6 +22,7 @@
 #include "../services/FaceAccessService.h"
 #include "../services/ConversationExportService.h"
 #include "../services/SpeechService.h"
+#include "../services/SpeakerRecognitionService.h"
 #include "../services/DictationService.h"
 #include "../services/SignalAnalysisService.h"
 #include "../services/AgentService.h"
@@ -64,6 +66,7 @@ public:
     Q_PROPERTY(FaceAccessService *faceAccess READ faceAccess CONSTANT)
     Q_PROPERTY(ConversationExportService *exports READ exports CONSTANT)
     Q_PROPERTY(SpeechService *speech READ speech CONSTANT)
+    Q_PROPERTY(SpeakerRecognitionService *speakerRecognition READ speakerRecognition CONSTANT)
     Q_PROPERTY(DictationService *dictation READ dictation CONSTANT)
     Q_PROPERTY(SignalAnalysisService *analysis READ analysis CONSTANT)
     Q_PROPERTY(SystemContextService *systemContext READ systemContext CONSTANT)
@@ -75,6 +78,7 @@ public:
     Q_PROPERTY(InspectionWorkflowService *workflow READ workflow CONSTANT)
     Q_PROPERTY(HardwareStatusService *hardware READ hardware CONSTANT)
     Q_PROPERTY(AcousticEvaluationService *evaluation READ evaluation CONSTANT)
+    Q_PROPERTY(AcousticImagingService *acousticImaging READ acousticImaging CONSTANT)
     Q_PROPERTY(ChartTransferService *chartTransfer READ chartTransfer CONSTANT)
     Q_PROPERTY(KnowledgeGraphService *knowledge READ knowledge CONSTANT)
     Q_PROPERTY(InputController *input READ input CONSTANT)
@@ -101,6 +105,7 @@ public:
     FaceAccessService *faceAccess() const { return faceAccess_; }
     ConversationExportService *exports() const { return exports_; }
     SpeechService *speech() const { return speech_; }
+    SpeakerRecognitionService *speakerRecognition() const { return speakerRecognition_; }
     DictationService *dictation() const { return dictation_; }
     SignalAnalysisService *analysis()const{return analysis_;}
     SystemContextService *systemContext()const{return systemContext_;}
@@ -112,6 +117,7 @@ public:
     InspectionWorkflowService *workflow()const{return workflow_;}
     HardwareStatusService *hardware()const{return hardware_;}
     AcousticEvaluationService *evaluation()const{return evaluation_;}
+    AcousticImagingService *acousticImaging()const{return acousticImaging_;}
     ChartTransferService *chartTransfer()const{return chartTransfer_;}
     KnowledgeGraphService *knowledge()const{return knowledge_;}
     InputController *input() const { return input_; }
@@ -148,6 +154,8 @@ private:
     FaceAccessService *faceAccess_ = nullptr;
     ConversationExportService *exports_ = nullptr;
     SpeechService *speech_ = nullptr;
+    SpeakerRecognitionService *speakerRecognition_ = nullptr;
+    AcousticImagingService *acousticImaging_ = nullptr;
     DictationService *dictation_ = nullptr;
     SignalAnalysisService *analysis_ = nullptr;
     SystemContextService *systemContext_=nullptr;

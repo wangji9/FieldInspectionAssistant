@@ -9,7 +9,7 @@ struct PreviewNode:QSGNode {
 };
 }
 CameraPreviewItem::CameraPreviewItem(QQuickItem *parent):QQuickItem(parent){setFlag(ItemHasContents,true);connect(this,&QQuickItem::visibleChanged,this,[this]{if(isVisible())update();});connect(this,&QQuickItem::smoothChanged,this,[this]{update();});}
-void CameraPreviewItem::setFrame(const QImage&frame){if(frame.cacheKey()==frame_.cacheKey())return;frame_=frame;if(isVisible())update();emit frameChanged();}
+void CameraPreviewItem::setFrame(const QImage&frame){if(frame.cacheKey()==frame_.cacheKey())return;frame_=frame;if(isVisible())update();emit frameChanged();emit contentRectChanged();}
 void CameraPreviewItem::setFillCrop(bool fill)
 {
     if (fillCrop_ == fill)
@@ -17,6 +17,7 @@ void CameraPreviewItem::setFillCrop(bool fill)
     fillCrop_ = fill;
     update();
     emit fillCropChanged();
+    emit contentRectChanged();
 }
 
 void CameraPreviewItem::setFrameAspectSize(const QSize &size)
@@ -26,6 +27,7 @@ void CameraPreviewItem::setFrameAspectSize(const QSize &size)
     frameAspectSize_ = size;
     update();
     emit frameAspectSizeChanged();
+    emit contentRectChanged();
 }
 
 QRectF CameraPreviewItem::frameRect(const QRectF &bounds, const QSize &source, bool fillCrop)
@@ -36,7 +38,7 @@ QRectF CameraPreviewItem::frameRect(const QRectF &bounds, const QSize &source, b
     return frame;
 }
 
-void CameraPreviewItem::geometryChange(const QRectF&next,const QRectF&old){QQuickItem::geometryChange(next,old);if(next.size()!=old.size())update();}
+void CameraPreviewItem::geometryChange(const QRectF&next,const QRectF&old){QQuickItem::geometryChange(next,old);if(next.size()!=old.size()){update();emit contentRectChanged();}}
 QSGNode *CameraPreviewItem::updatePaintNode(QSGNode *old,UpdatePaintNodeData*){
     const auto bounds = boundingRect();
     if(frame_.isNull()||bounds.isEmpty()||!window()){delete old;return nullptr;}

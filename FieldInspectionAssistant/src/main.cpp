@@ -13,6 +13,7 @@
 #include <QPalette>
 #include "app/AppController.h"
 #include "ui/CameraPreviewItem.h"
+#include "ui/AcousticPlots.h"
 #include "ui/UiAudit.h"
 #include "ui/DesktopWindow.h"
 #include "ui/ThermalWindow.h"
@@ -61,6 +62,8 @@ int main(int argc, char *argv[]) {
         return 2;
     }
 
+    qmlRegisterType<SpeakerTimelineItem>("FieldInspection",1,0,"SpeakerTimelineView");
+    qmlRegisterType<MicrophoneArrayItem>("FieldInspection",1,0,"MicrophoneArrayView");
     qmlRegisterType<CameraPreviewItem>("FieldInspection", 1, 0, "CameraPreview");
     qmlRegisterType<LiveVisionItem>("FieldInspection", 1, 0, "LiveVisionView");
     qmlRegisterType<ThermalWindow>("FieldInspection", 1, 0, "ThermalWindow");

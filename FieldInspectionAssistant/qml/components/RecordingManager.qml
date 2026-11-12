@@ -18,6 +18,7 @@ Item {
     readonly property bool busy:App.analysis.running||App.analysis.recordingBusy||App.analysis.exportBusy
     signal importRequested()
     signal analyzeRequested()
+    signal speakerRequested(string path, string name)
     function query(page){App.analysis.queryRecordings({search:searchText,trash:trash,origin:["","sensor","imported"][originIndex]},page||0)}
     function showRecord(id,edit){
         var result=App.analysis.recordingDetail(id)
@@ -73,6 +74,10 @@ Item {
                         background:Rectangle{radius:8;color:parent.hovered?Colors.infoDark:"transparent"}
                         Menu {
                             id:actions
+                            MenuItem {
+                                text: "声纹识别"; visible: !root.trash; enabled: modelData.complete && modelData.file_exists
+                                onTriggered: root.speakerRequested(modelData.path, modelData.display_name)
+                            }
                             MenuItem {text:"详情";onTriggered:root.showRecord(modelData.id,false)}
                             MenuItem {text:"编辑信息";visible:!root.trash;enabled:modelData.can_edit&&!root.busy;onTriggered:root.showRecord(modelData.id,true)}
                             MenuItem {text:"移入回收站";visible:!root.trash;enabled:modelData.can_edit&&!root.busy;onTriggered:root.requestDelete(modelData.id)}

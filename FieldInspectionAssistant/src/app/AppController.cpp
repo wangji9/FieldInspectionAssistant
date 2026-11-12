@@ -28,6 +28,7 @@ AppController::AppController(QObject *parent) : QObject(parent) {
     dictation_ = new DictationService(speech_,ai_,this);
     input_ = new InputController(dictation_,this);
     session_ = new SessionManager(db_, this);
+    speakerRecognition_ = new SpeakerRecognitionService(session_, this);
     visionAlgorithms_ = new VisionAlgorithmService(session_, this);
     visionLive_ = new VisionLiveService(camera_, session_, this);
     videoUnderstanding_ = new VideoUnderstandingService(camera_, session_, this);
@@ -45,6 +46,7 @@ AppController::AppController(QObject *parent) : QObject(parent) {
     connect(workspace_,&WorkspaceService::dataChanged,this,&AppController::refreshModels);
     analysis_ = new SignalAnalysisService(db_,session_,QStandardPaths::writableLocation(QStandardPaths::AppDataLocation)+"/measurements",this);
     evaluation_=new AcousticEvaluationService(db_,session_,workspace_,analysis_,this);
+    acousticImaging_=new AcousticImagingService(analysis_,camera_,evidence_,speakerRecognition_,session_,this);
     analysis_->setReportGuard([this]{if(evaluation_&&evaluation_->busy())return true;if(voiceAssistant_&&voiceAssistant_->engaged())return !voiceAssistant_->suspendForActivity();return false;});
     systemContext_=new SystemContextService(db_,session_,workspace_,analysis_,this);
     knowledge_ = new KnowledgeGraphService(db_,session_,this);
@@ -56,7 +58,7 @@ AppController::AppController(QObject *parent) : QObject(parent) {
     voiceAssistant_->setActivityGuard([this]{return ai_->busy()||agent_->busy()||knowledge_->busy()||evaluation_->busy()||analysis_->running()||workspace_->busy()||speech_->recording()||speech_->speechBusy()||dictation_->active();});
     speech_->setExternalGuard([this]{if(voiceAssistant_&&voiceAssistant_->engaged())return !voiceAssistant_->suspendForActivity();return false;});
     connect(session_,&SessionManager::sessionChanged,this,[this]{defects_->setCurrentActor(session_->userId());db_->setActor(session_->userId(),session_->userName());});
-    workspace_->setActivityGuard([this]{return (voiceAssistant_&&(voiceAssistant_->engaged()||voiceAssistant_->busy()))||evaluation_->busy()||chartTransfer_->busy()||analysis_->running()||analysis_->exportBusy()||analysis_->recordingBusy()||camera_->recording()||camera_->finalizing()||camera_->photoSaving()||ai_->busy()||agent_->busy()||knowledge_->busy()||speech_->recording()||dictation_->active();});
+    workspace_->setActivityGuard([this]{return (voiceAssistant_&&(voiceAssistant_->engaged()||voiceAssistant_->busy()))||evaluation_->busy()||chartTransfer_->busy()||analysis_->running()||analysis_->exportBusy()||analysis_->recordingBusy()||camera_->recording()||camera_->finalizing()||camera_->photoSaving()||ai_->busy()||agent_->busy()||knowledge_->busy()||speech_->recording()||speakerRecognition_->busy()||dictation_->active();});
     connect(workspace_,&WorkspaceService::maintenanceReady,this,[this](const QString&,const QVariantMap&r){if(r.value("restart_required").toBool())QTimer::singleShot(500,qApp,&QCoreApplication::quit);});
     nav_ = new NavigationController(this);
     taskModel_ = new TaskListModel(this);
@@ -69,6 +71,8 @@ AppController::AppController(QObject *parent) : QObject(parent) {
 }
 
 AppController::~AppController() {
+    delete acousticImaging_;
+    delete speakerRecognition_;
     delete voiceAssistant_;voiceAssistant_=nullptr;delete evaluation_;evaluation_=nullptr;delete hardware_;delete chartTransfer_;delete workflow_;delete workspace_;delete agent_;delete knowledge_;delete systemContext_;delete analysis_;delete db_;
 }
 
