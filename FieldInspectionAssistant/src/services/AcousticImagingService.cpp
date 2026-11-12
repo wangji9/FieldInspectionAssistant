@@ -16,7 +16,6 @@
 namespace {
 constexpr float StableDirection = .98480775f; // cos(10 degrees)
 constexpr qint64 RefreshMs = 33;
-constexpr qint64 HeatmapRefreshMs = 95;
 constexpr qint64 AudioExpiryMs = 800;
 constexpr qint64 LocalizationGapMs = 340;
 constexpr double VoiceWindow = 3.3;
@@ -184,9 +183,12 @@ bool AcousticImagingService::adopt(const QVariantMap &values)
     next.temperature=number("temperature",next.temperature,-25,60);
     next.lowerHz=int(number("lower_hz",next.lowerHz,80,5500));
     next.upperHz=int(number("upper_hz",next.upperHz,200,7400));
-    next.targetHz = int(number("target_hz", (next.lowerHz + next.upperHz) / 2,
+    const auto targetHz = int(number("target_hz", (next.lowerHz + next.upperHz) / 2,
         AcousticImagingEngine::MinimumTargetHz, AcousticImagingEngine::MaximumTargetHz));
-    next.timeDomain = values.value("time_domain", false).toBool();
+    const auto algorithm = int(number("algorithm", values.value("time_domain").toBool() ? 1 : 0, 0, 3));
+    next.timeDomain = algorithm == 1;
+    next.mvdr = algorithm == 3;
+    next.targetHz = algorithm == 2 ? 0 : targetHz;
     next.dynamicRangeDb = number("dynamic_range_db", next.dynamicRangeDb, .1, 30.);
     next.gateDbfs=number("gate_dbfs",next.gateDbfs,-100,-12);
     next.smoothing=number("smoothing",next.smoothing,0,.95);
@@ -215,8 +217,9 @@ bool AcousticImagingService::adopt(const QVariantMap &values)
     parameters_={{"radius_mm",next.radiusMm},{"channel_one_deg",next.channelOneDegrees},{"clockwise",next.clockwise},
         {"channel_order",orderText.join(',')},{"horizontal_fov",next.horizontalFov},{"vertical_fov",next.verticalFov},
         {"yaw",next.yaw},{"pitch",next.pitch},{"roll",next.roll},{"temperature",next.temperature},
-        {"lower_hz",next.lowerHz},{"upper_hz",next.upperHz},{"target_hz",next.targetHz},
-        {"time_domain",next.timeDomain},{"dynamic_range_db",next.dynamicRangeDb},
+        {"lower_hz",next.lowerHz},{"upper_hz",next.upperHz},{"target_hz",targetHz},
+        {"algorithm",algorithm},{"time_domain",next.timeDomain},{"target_frequency_enabled",algorithm == 0 || algorithm == 3},
+        {"dynamic_range_db",next.dynamicRangeDb},
         {"target_min_hz",AcousticImagingEngine::MinimumTargetHz},{"target_max_hz",AcousticImagingEngine::MaximumTargetHz},
         {"gate_dbfs",next.gateDbfs},{"smoothing",next.smoothing},
         {"opacity",opacity},{"speaker_threshold",threshold},{"speaker",values.value("speaker",true).toBool()},
@@ -231,6 +234,8 @@ bool AcousticImagingService::configure(const QVariantMap &values)
     auto merged=parameters_;
     for (auto it=values.cbegin();it!=values.cend();++it)
         merged.insert(it.key(),it.value());
+    if (values.contains("time_domain") && !values.contains("algorithm"))
+        merged["algorithm"] = values.value("time_domain").toBool() ? 1 : 0;
     const auto previous = parameters_;
     if (!adopt(merged))
         return reject(tr("请检查频带、阵列尺寸和通道顺序。通道 1–6 每个只能出现一次。"));
@@ -311,8 +316,6 @@ void AcousticImagingService::clearObservation(bool clearPlots, bool clearHeatmap
         heatmap_ = {};
         emit heatmapChanged();
     }
-    lastPlotMs_ = 0;
-    lastHeatmapMs_ = 0;
     match_.clear();
     direction_={};
     stableDirection_={};
@@ -342,8 +345,7 @@ void AcousticImagingService::sample()
     }
     const bool speaker=parameters_.value("speaker").toBool();
     const auto rate=AcousticImagingEngine::SampleRate;
-    const bool includeHeatmap = !lastHeatmapMs_ || now - lastHeatmapMs_ >= HeatmapRefreshMs;
-    const bool requestVoice=includeHeatmap && speaker && stableSince_ && lastFrame_>=stableSince_+quint64(rate*VoiceWindow) &&
+    const bool requestVoice=speaker && stableSince_ && lastFrame_>=stableSince_+quint64(rate*VoiceWindow) &&
         lastFrame_>=lastVoice_+quint64(rate*VoiceInterval) && speakers_->canClassifyBeam();
     auto window=audio_->sixChannelWindow(requestVoice ? VoiceWindow : .128);
     if (window.pcm.size()<AcousticImagingEngine::Window*12 || window.receivedMs<=0 || now-window.receivedMs>AudioExpiryMs)
@@ -360,26 +362,20 @@ void AcousticImagingService::sample()
     lastReceived_=window.receivedMs;
     const auto revision=revision_;
     const bool configure=engineRevision_!=revision;
-    const bool includePlots = !lastPlotMs_ || now - lastPlotMs_ >= RefreshMs - 4;
-    if (includePlots)
-        lastPlotMs_ = now;
-    if (includeHeatmap)
-        lastHeatmapMs_ = now;
     engineRevision_=revision;
     computing_=true;
     watcher_.setFuture(QtConcurrent::run(&pool_,[engine=engine_,window=std::move(window),revision,configure,
-                                                config=config_,requestVoice,last=stableDirection_,includePlots,includeHeatmap] {
+                                                config=config_,requestVoice,last=stableDirection_] {
         Analysis result;
         result.revision=revision;
         result.endFrame=window.endFrame;
         result.receivedMs=window.receivedMs;
         result.rate=window.sampleRate;
-        result.heatmapUpdated = includeHeatmap;
         if (configure)
             engine->configure(config,window.sampleRate);
         else
             engine->setDynamicRange(config.dynamicRangeDb);
-        result.frame=engine->analyze(window.pcm, includePlots, includeHeatmap);
+        result.frame=engine->analyze(window.pcm, true);
         if (requestVoice && result.frame.valid && closeDirection(last,result.frame.arrayDirection)) {
             result.beam=engine->beamform(window.pcm,result.frame.arrayDirection);
             result.voiceEndMs=qint64(window.endFrame)*1000/window.sampleRate;
@@ -400,11 +396,10 @@ void AcousticImagingService::receive()
         plots_ = frame.plots;
         emit plotsChanged();
     }
-    if (!result.heatmapUpdated)
-        return;
     observation_=frame.values;
     status_=stateLabel(frame.values.value("state").toString());
-    const auto midpoint=result.receivedMs-AcousticImagingEngine::Window*500/result.rate;
+    const auto samplesBack = frame.values.value("audio_offset_samples", AcousticImagingEngine::Window / 2).toInt();
+    const auto midpoint=result.receivedMs-qint64(samplesBack)*1000/result.rate;
     observation_["timestamp"]=QDateTime::fromMSecsSinceEpoch(midpoint,Qt::UTC).toString(Qt::ISODateWithMs);
     observation_["audio_frame"]=QVariant::fromValue(result.endFrame);
     observation_["audio_ms"]=qint64(result.endFrame)*1000/result.rate;

@@ -18,6 +18,7 @@ struct AcousticArrayConfig {
     int lowerHz = 450, upperHz = 3800;
     int targetHz = 0;
     bool timeDomain = false;
+    bool mvdr = false;
     double dynamicRangeDb = 6.0;
     double gateDbfs = -55.0;
     double smoothing = 0.55;
@@ -35,7 +36,7 @@ class AcousticImagingEngine {
 public:
     static constexpr int Channels = 6;
     static constexpr int Window = 2048;
-    static constexpr int TimeWindow = 512;
+    static constexpr int TimeWindow = 1024;
     static constexpr int SampleRate = 16000;
     static constexpr int MinimumTargetHz = 80;
     static constexpr int MaximumTargetHz = 7400;

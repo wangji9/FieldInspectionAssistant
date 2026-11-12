@@ -65,7 +65,6 @@ private:
         qint64 receivedMs = 0;
         qint64 voiceStartMs = 0, voiceEndMs = 0;
         int rate = 0;
-        bool heatmapUpdated = false;
     };
 
     void sample();
@@ -92,8 +91,6 @@ private:
     QVector3D direction_, stableDirection_, voiceDirection_;
     quint64 revision_ = 1, engineRevision_ = 0, lastFrame_ = 0, stableSince_ = 0, lastVoice_ = 0, beamRequest_ = 0;
     qint64 lastReceived_ = 0, lastLocalized_ = 0, voiceCaptured_ = 0, voiceFrom_ = 0, voiceTo_ = 0;
-    qint64 lastPlotMs_ = 0;
-    qint64 lastHeatmapMs_ = 0;
     bool running_ = false, ownsAudio_ = false, ownsCamera_ = false, computing_ = false;
     bool keepPreview_ = false;
 };

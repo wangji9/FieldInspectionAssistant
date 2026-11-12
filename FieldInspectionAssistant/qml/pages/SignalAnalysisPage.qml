@@ -147,11 +147,11 @@ Rectangle {
     }
     ColumnLayout {
         visible:!root.settingsOpen
-        anchors.fill:parent;anchors.margins:8;spacing:6
+        anchors.fill:parent;anchors.margins:root.tab===6?3:8;spacing:root.tab===6?2:6
         Item {
-            objectName:"analysisMainNavigation";Layout.fillWidth:true;Layout.preferredHeight:36
-        Flickable {anchors.left:parent.left;anchors.right:parent.right;anchors.rightMargin:68;height:36;contentWidth:navigationRow.width;clip:true;boundsBehavior:Flickable.StopAtBounds
-            Row {id:navigationRow;height:36;spacing:4
+            objectName:"analysisMainNavigation";Layout.fillWidth:true;Layout.preferredHeight:root.tab===6?28:36
+        Flickable {anchors.left:parent.left;anchors.right:parent.right;anchors.rightMargin:root.tab<5?68:0;height:parent.height;contentWidth:navigationRow.width;clip:true;boundsBehavior:Flickable.StopAtBounds
+            Row {id:navigationRow;height:parent.height;spacing:4
                 Repeater {model:["采集通道","信号分析","趋势","声学评估","录音管理","声纹识别","声学成像"]
                     TouchButton{objectName:"analysisTab"+index;text:modelData;autoWidth:true;height:28;variant:root.tab===index?"tonal":"secondary";onClicked:root.tab=index}
                 }

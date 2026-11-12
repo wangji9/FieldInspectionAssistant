@@ -1,12 +1,43 @@
 #include "CameraPreviewItem.h"
 #include <QQuickWindow>
 #include <QSGImageNode>
+#include <QSGOpacityNode>
 #include <QSGTexture>
 namespace {
 struct PreviewNode:QSGNode {
-    QSGImageNode *image=nullptr;qint64 key=0;
-    explicit PreviewNode(QQuickWindow *window){image=window->createImageNode();image->setOwnsTexture(true);image->setFiltering(QSGTexture::Linear);appendChildNode(image);}
+    QSGImageNode *image = nullptr;
+    QSGImageNode *overlay = nullptr;
+    QSGOpacityNode *overlayOpacity = nullptr;
+    qint64 key = 0, overlayKey = 0;
 };
+
+void updateImageNode(QQuickWindow *window, QSGNode *parent, QSGImageNode *&node,
+                     qint64 &key, const QImage &image, const QRectF &target,
+                     const QRectF &source, bool smooth)
+{
+    if (image.isNull()) {
+        delete node;
+        node = nullptr;
+        key = 0;
+        return;
+    }
+    if (!node || key != image.cacheKey()) {
+        const auto options = image.hasAlphaChannel() ? QQuickWindow::TextureHasAlphaChannel : QQuickWindow::TextureIsOpaque;
+        auto *texture = window->createTextureFromImage(image, options);
+        if (!texture)
+            return;
+        if (!node) {
+            node = window->createImageNode();
+            node->setOwnsTexture(true);
+            parent->prependChildNode(node);
+        }
+        node->setTexture(texture);
+        key = image.cacheKey();
+    }
+    node->setFiltering(smooth ? QSGTexture::Linear : QSGTexture::Nearest);
+    node->setSourceRect(source);
+    node->setRect(target);
+}
 }
 CameraPreviewItem::CameraPreviewItem(QQuickItem *parent):QQuickItem(parent){setFlag(ItemHasContents,true);connect(this,&QQuickItem::visibleChanged,this,[this]{if(isVisible())update();});connect(this,&QQuickItem::smoothChanged,this,[this]{update();});}
 void CameraPreviewItem::setFrame(const QImage &frame)
@@ -31,6 +62,25 @@ void CameraPreviewItem::setFillCrop(bool fill)
     emit contentRectChanged();
 }
 
+void CameraPreviewItem::setOverlayFrame(const QImage &frame)
+{
+    if (frame.cacheKey() == overlayFrame_.cacheKey())
+        return;
+    overlayFrame_ = frame;
+    update();
+    emit overlayFrameChanged();
+}
+
+void CameraPreviewItem::setOverlayOpacity(qreal opacity)
+{
+    const auto bounded = qBound(0., opacity, 1.);
+    if (qFuzzyCompare(bounded, overlayOpacity_))
+        return;
+    overlayOpacity_ = bounded;
+    update();
+    emit overlayOpacityChanged();
+}
+
 void CameraPreviewItem::setFrameAspectSize(const QSize &size)
 {
     if (size == frameAspectSize_)
@@ -52,25 +102,29 @@ QRectF CameraPreviewItem::frameRect(const QRectF &bounds, const QSize &source, b
 void CameraPreviewItem::geometryChange(const QRectF&next,const QRectF&old){QQuickItem::geometryChange(next,old);if(next.size()!=old.size()){update();emit contentRectChanged();}}
 QSGNode *CameraPreviewItem::updatePaintNode(QSGNode *old,UpdatePaintNodeData*){
     const auto bounds = boundingRect();
-    if(frame_.isNull()||bounds.isEmpty()||!window()){delete old;return nullptr;}
-    auto *node=static_cast<PreviewNode*>(old);if(!node)node=new PreviewNode(window());
-    if(node->key!=frame_.cacheKey()){
-        const auto options = frame_.hasAlphaChannel() ? QQuickWindow::TextureHasAlphaChannel : QQuickWindow::TextureIsOpaque;
-        auto *texture=window()->createTextureFromImage(frame_,options);if(!texture)return node;
-        // QSGImageNode owns the texture and releases its previous texture here.
-        node->image->setTexture(texture);node->key=frame_.cacheKey();
+    if ((frame_.isNull() && overlayFrame_.isNull()) || bounds.isEmpty() || !window()) {
+        delete old;
+        return nullptr;
     }
-    node->image->setFiltering(smooth() ? QSGTexture::Linear : QSGTexture::Nearest);
-    const auto frame = frameRect(bounds, frameAspectSize_.isEmpty() ? frame_.size() : frameAspectSize_, fillCrop_);
-    if (fillCrop_) {
-        const qreal sx = frame_.width() / frame.width();
-        const qreal sy = frame_.height() / frame.height();
-        node->image->setSourceRect(QRectF((bounds.left() - frame.left()) * sx,
-            (bounds.top() - frame.top()) * sy, bounds.width() * sx, bounds.height() * sy));
-        node->image->setRect(bounds);
-    } else {
-        node->image->setSourceRect(QRectF(QPointF(), frame_.size()));
-        node->image->setRect(frame);
+    auto *node = old ? static_cast<PreviewNode *>(old) : new PreviewNode;
+    const auto frame = frame_.isNull() ? bounds : contentRect();
+    const auto target = fillCrop_ ? bounds : frame;
+    const QRectF uv((target.left() - frame.left()) / frame.width(),
+                    (target.top() - frame.top()) / frame.height(),
+                    target.width() / frame.width(), target.height() / frame.height());
+    updateImageNode(window(), node, node->image, node->key, frame_, target,
+                    QRectF(uv.x() * frame_.width(), uv.y() * frame_.height(),
+                           uv.width() * frame_.width(), uv.height() * frame_.height()), smooth());
+    if (!overlayFrame_.isNull() || node->overlayOpacity) {
+        if (!node->overlayOpacity) {
+            node->overlayOpacity = new QSGOpacityNode;
+            node->appendChildNode(node->overlayOpacity);
+        }
+        node->overlayOpacity->setOpacity(overlayOpacity_);
+        const auto w = overlayFrame_.width() - 1, h = overlayFrame_.height() - 1;
+        // Acoustic grid endpoints are defined at the first and last pixel centres.
+        updateImageNode(window(), node->overlayOpacity, node->overlay, node->overlayKey, overlayFrame_, target,
+                        QRectF(.5 + uv.x() * w, .5 + uv.y() * h, uv.width() * w, uv.height() * h), true);
     }
     return node;
 }

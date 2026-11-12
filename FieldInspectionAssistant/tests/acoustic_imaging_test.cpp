@@ -117,7 +117,7 @@ int main(int argc,char **argv)
     for (int channel = 0; channel < channels; ++channel) {
         const auto points = frequency.at(channel).toMap().value("native_points").value<QPolygonF>();
         if (points.size() != AcousticImagingEngine::Window / 2 + 1 ||
-            time.at(channel).toMap().value("native_points").value<QPolygonF>().isEmpty())
+            time.at(channel).toMap().value("native_points").value<QPolygonF>().size() != AcousticImagingEngine::TimeWindow)
             return 6;
         const auto peak = *std::max_element(points.cbegin(), points.cend(), [](const QPointF &a, const QPointF &b) {
             return a.y() < b.y();
@@ -176,5 +176,26 @@ int main(int argc,char **argv)
     const auto quietMap = engine.analyze(silence);
     if (quietMap.valid || quietMap.heatmap.isNull() || countHot(quietMap.heatmap))
         return 13;
+    geometry.timeDomain = false;
+    geometry.mvdr = true;
+    geometry.targetHz = 2513;
+    engine.configure(geometry, Rate);
+    for (int frame = 0; frame < 6; ++frame) {
+        const auto result = engine.analyze(mixed, true);
+        if (!result.valid || result.heatmap.isNull()
+            || std::abs(result.values.value("azimuth_deg").toDouble() - 17) > 3
+            || std::abs(result.values.value("elevation_deg").toDouble() - 7) > 3)
+            return 14;
+    }
+    geometry.mvdr = false;
+    geometry.targetHz = 0;
+    engine.configure(geometry, Rate);
+    const auto broadband = engine.analyze(source(-19, 11, geometry.radiusMm), true);
+    if (!broadband.valid || broadband.heatmap.isNull()
+        || std::abs(broadband.values.value("azimuth_deg").toDouble() + 19) > 3
+        || std::abs(broadband.values.value("elevation_deg").toDouble() - 11) > 3)
+        return 15;
+    if (engine.analyze(silence).heatmap.isNull())
+        return 16;
     return 0;
 }

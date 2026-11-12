@@ -6,6 +6,7 @@
 #include <opencv2/core.hpp>
 #include <algorithm>
 #include <cmath>
+#include <complex>
 #include <numeric>
 
 namespace {
@@ -19,6 +20,7 @@ constexpr int Height = 44;
 constexpr int TargetHalfBins = 0;
 constexpr int TargetBins = 2 * TargetHalfBins + 1;
 constexpr int TimeWindow = AcousticImagingEngine::TimeWindow;
+constexpr int IntegrationWindow = 512;
 constexpr float Pi = 3.14159265358979323846f;
 constexpr double Degree = Pi/180.0;
 
@@ -83,7 +85,7 @@ QVariantMap capturePlots(const QByteArray &pcm, int start, int rate,
     frequencyAverage.reserve(N / 2 + 1);
     std::array<double, N / 2 + 1> sumMagnitude{};
     std::array<double, TimeWindow> sumSample{};
-    const int waveStart = start + (N - TimeWindow) / 2;
+    const int waveStart = start + N - TimeWindow;
     const auto toDb = [](double magnitude) { return 20 * std::log10(std::max(1e-6, magnitude)); };
     for (int mic = 0; mic < MicCount; ++mic) {
         QPolygonF time;
@@ -136,8 +138,9 @@ struct AcousticImagingEngine::State {
     std::array<cv::Mat,MicCount> input, spectra;
     std::array<cv::Mat,PairCount> correlations;
     cv::Mat cross;
-    std::vector<std::array<float,PairCount>> delays;
-    std::vector<QVector3D> arrayDirections, cameraDirections;
+    struct Lag { int lo, hi; float fraction; };
+    std::vector<std::array<Lag,PairCount>> delays;
+    std::vector<QVector3D> cameraDirections;
     std::vector<float> previous;
     using Steering = std::array<std::array<cv::Vec2f, MicCount>, TargetBins>;
     std::vector<Steering> steering;
@@ -146,6 +149,9 @@ struct AcousticImagingEngine::State {
     std::vector<float> crossPrefix;
     int shiftLimit = 0;
     std::vector<float> scores;
+    using Complex = std::complex<float>;
+    std::array<std::array<Complex, MicCount>, MicCount> covariance{};
+    bool covarianceReady = false;
 
     State() : cross(CorrelationSize,1,CV_32FC2)
     {
@@ -182,9 +188,9 @@ void AcousticImagingEngine::configure(const AcousticArrayConfig &configuration,i
     }
 
     s.delays.resize(Width*Height);
-    s.arrayDirections.resize(Width*Height);
     s.cameraDirections.resize(Width*Height);
     s.previous.clear();
+    s.covarianceReady = false;
     s.scores.resize(Width * Height);
     s.steering.resize(!configuration.timeDomain && configuration.targetHz > 0 ? Width * Height : 0);
     s.timeShifts.resize(configuration.timeDomain ? Width * Height : 0);
@@ -196,7 +202,6 @@ void AcousticImagingEngine::configure(const AcousticArrayConfig &configuration,i
             const int cell=y*Width+x;
             const auto camera=QVector3D((2.f*x/(Width-1)-1)*tx,(1-2.f*y/(Height-1))*ty,1).normalized();
             const auto direction=rotateToArray(camera,configuration);
-            s.arrayDirections[cell]=direction;
             s.cameraDirections[cell]=camera;
             if (configuration.timeDomain) {
                 for (int mic = 0; mic < MicCount; ++mic)
@@ -215,8 +220,11 @@ void AcousticImagingEngine::configure(const AcousticArrayConfig &configuration,i
             }
             for (int p=0;p<PairCount;++p) {
                 const auto [i,j]=s.pairs[p];
-                s.delays[cell][p]=QVector3D::dotProduct(s.positions[j]-s.positions[i],direction)*
-                    s.samplesPerMeter*Interpolation;
+                const auto delay = QVector3D::dotProduct(s.positions[j]-s.positions[i],direction)
+                    * s.samplesPerMeter * Interpolation;
+                const int lo = int(std::floor(delay));
+                s.delays[cell][p] = {(CorrelationSize + lo) % CorrelationSize,
+                    (CorrelationSize + lo + 1) % CorrelationSize, delay - lo};
             }
         }
     }
@@ -266,6 +274,7 @@ AcousticImageFrame AcousticImagingEngine::analyze(const QByteArray &pcm, bool in
         levels.append(dbfs(sum,N));
     const auto level=dbfs(std::accumulate(squares.cbegin(),squares.cend(),0.),N*MicCount);
     output.values={{"level_dbfs",level},{"channels_dbfs",levels}};
+    output.values["audio_offset_samples"] = timeDomain ? IntegrationWindow / 2 + N / 32 : N / 2;
     const bool belowGate = level < s.config.gateDbfs;
     const bool duplicate = std::count(distinct.begin(), distinct.end(), true) < 3;
     if (!timeDomain && (includePlots || targeted || (!belowGate && !duplicate))) {
@@ -276,11 +285,11 @@ AcousticImageFrame AcousticImagingEngine::analyze(const QByteArray &pcm, bool in
         output.plots = capturePlots(pcm, start, s.sampleRate, s.spectra, s.windowSum, !timeDomain);
     if (!includeHeatmap)
         return output;
-    if (duplicate || (belowGate && !targeted && !timeDomain)) {
+    if (duplicate || belowGate) {
         s.previous.clear();
+        s.covarianceReady = false;
         output.values["state"] = belowGate ? "below_gate" : "duplicate_channels";
-        if (targeted || timeDomain)
-            output.heatmap = powerHeatmap(s.scores, 0, s.config.dynamicRangeDb);
+        output.heatmap = powerHeatmap(s.scores, 0, s.config.dynamicRangeDb);
         return output;
     }
 
@@ -289,7 +298,7 @@ AcousticImageFrame AcousticImagingEngine::analyze(const QByteArray &pcm, bool in
     double strengthDb = level;
     if (timeDomain) {
         std::fill(scores.begin(), scores.end(), 0.f);
-        constexpr int first = (N - TimeWindow) / 2;
+        constexpr int first = N - IntegrationWindow - N / 32;
         // (sum x)^2 - sum x^2 equals twice the sum of pair products.
         // Prefix sums let each direction reuse the exact shifted-window pair energy.
         const int maxLag = 2 * s.shiftLimit;
@@ -298,7 +307,7 @@ AcousticImageFrame AcousticImagingEngine::analyze(const QByteArray &pcm, bool in
             for (int lag = -maxLag; lag <= maxLag; ++lag) {
                 auto *prefix = s.crossPrefix.data() + (lag + maxLag) * (N + 1);
                 const int begin = first - s.shiftLimit;
-                const int end = first + TimeWindow + s.shiftLimit;
+                const int end = first + IntegrationWindow + s.shiftLimit;
                 prefix[begin] = 0.f;
                 for (int t = begin; t < end; ++t)
                     prefix[t + 1] = prefix[t] + (s.raw[i][t] - meanI) * (s.raw[j][t + lag] - meanJ);
@@ -311,7 +320,7 @@ AcousticImageFrame AcousticImagingEngine::analyze(const QByteArray &pcm, bool in
                 const int start = first + qRound(shift[i]);
                 const auto integral = [&](int delta) {
                     const auto *prefix = s.crossPrefix.data() + (lag + delta + maxLag) * (N + 1);
-                    return prefix[start + TimeWindow] - prefix[start];
+                    return prefix[start + IntegrationWindow] - prefix[start];
                 };
                 // Interpolate the lag response rather than attenuating the
                 // waveforms with two independent fractional-sample filters.
@@ -352,8 +361,46 @@ AcousticImageFrame AcousticImagingEngine::analyze(const QByteArray &pcm, bool in
         output.values["target_hz"] = s.config.targetHz;
         output.values["target_dbfs"] = bandLevel;
         targetAbsent = bandLevel < s.config.gateDbfs || targetPower < 2.5 * TargetBins * noisePower / std::max(1, noiseBins);
+        cv::Matx<float, 2 * MicCount, 2 * MicCount> inverse;
+        bool useMvdr = false;
+        if (s.config.mvdr && !targetAbsent) {
+            const float weight = s.covarianceReady ? .25f : 1.f;
+            const float normalize = float(1. / targetPower);
+            cv::Matx<float, 2 * MicCount, 2 * MicCount> loaded;
+            for (int i = 0; i < MicCount; ++i) {
+                const State::Complex a(bins[0][i][0], bins[0][i][1]);
+                for (int j = 0; j < MicCount; ++j) {
+                    const State::Complex b(bins[0][j][0], bins[0][j][1]);
+                    auto &entry = s.covariance[i][j];
+                    entry = (1 - weight) * entry + weight * normalize * a * std::conj(b);
+                    const float loading = i == j ? .08f / MicCount : 0.f;
+                    loaded(i, j) = loaded(i + MicCount, j + MicCount) = entry.real() + loading;
+                    loaded(i, j + MicCount) = -entry.imag();
+                    loaded(i + MicCount, j) = entry.imag();
+                }
+            }
+            s.covarianceReady = true;
+            useMvdr = cv::invert(loaded, inverse, cv::DECOMP_CHOLESKY) != 0;
+        } else if (targetAbsent) {
+            s.covarianceReady = false;
+        }
+        float diagonal = 0;
+        if (useMvdr)
+            for (int i = 0; i < MicCount; ++i)
+                diagonal += inverse(i, i);
         const float norm = targetPower > 0 ? float(1. / (MicCount * targetPower)) : 0.f;
         for (size_t cell = 0; cell < scores.size(); ++cell) {
+            if (useMvdr) {
+                const auto &steering = s.steering[cell][0];
+                float denominator = diagonal;
+                for (const auto &[i, j] : s.pairs) {
+                    const float real = steering[i].dot(steering[j]);
+                    const float imag = steering[i][0] * steering[j][1] - steering[i][1] * steering[j][0];
+                    denominator += 2 * (inverse(i, j) * real - inverse(i + MicCount, j) * imag);
+                }
+                scores[cell] = MicCount / std::max(denominator, 1e-6f);
+                continue;
+            }
             float power = 0;
             for (int bin = 0; bin <= s.targetLastBin - s.targetFirstBin; ++bin) {
                 float real = 0, imaginary = 0;
@@ -385,12 +432,9 @@ AcousticImageFrame AcousticImagingEngine::analyze(const QByteArray &pcm, bool in
         for (size_t cell=0;cell<s.delays.size();++cell) {
             float value=0;
             for (int p=0;p<PairCount;++p) {
-                const float lag=s.delays[cell][p];
-                const int lo=int(std::floor(lag));
+                const auto lag = s.delays[cell][p];
                 const auto *r=s.correlations[p].ptr<float>();
-                const auto a=r[(CorrelationSize+lo)%CorrelationSize];
-                const auto b=r[(CorrelationSize+lo+1)%CorrelationSize];
-                value+=a+(b-a)*(lag-lo);
+                value += r[lag.lo] + (r[lag.hi] - r[lag.lo]) * lag.fraction;
             }
             scores[cell]=value/PairCount;
         }
@@ -408,16 +452,12 @@ AcousticImageFrame AcousticImagingEngine::analyze(const QByteArray &pcm, bool in
     output.values["response"]=*maximum;
     output.values["contrast"]=prominence;
     output.values["processing_ms"]=time.nsecsElapsed()/1e6;
-    if (targeted || timeDomain) {
-        const auto strength = float(std::clamp((strengthDb - s.config.gateDbfs + 12) / 30, .2, 1.));
-        output.heatmap = powerHeatmap(scores, *maximum, s.config.dynamicRangeDb, strength);
-        s.previous = scores;
-    }
-    const bool diffuse = timeDomain ? *maximum <= 0 || prominence < .035f * *maximum
+    const auto strength = float(std::clamp((strengthDb - s.config.gateDbfs + 12) / 30, .2, 1.));
+    output.heatmap = powerHeatmap(scores, *maximum, s.config.dynamicRangeDb, strength);
+    s.previous = scores;
+    const bool diffuse = (timeDomain || s.config.mvdr) ? *maximum <= 0 || prominence < .035f * *maximum
                                     : *maximum < (targeted ? .45f : .08f) || prominence < .035f;
     if (belowGate || targetAbsent || diffuse) {
-        if (!targeted && !timeDomain)
-            s.previous.clear();
         output.values["state"] = belowGate ? "below_gate" : targetAbsent ? "target_absent" : "diffuse";
         return output;
     }
@@ -437,21 +477,28 @@ AcousticImageFrame AcousticImagingEngine::analyze(const QByteArray &pcm, bool in
             }
         }
     }
-    const auto camera=s.cameraDirections[peak];
+    const auto refine = [&](int axis, int limit, int stride) {
+        if (axis == 0 || axis == limit - 1)
+            return double(axis);
+        const float before = scores[peak - stride], after = scores[peak + stride];
+        const float curvature = before + after - 2 * *maximum;
+        const float offset = curvature < -1e-12f ? std::clamp(.5f * (before - after) / curvature, -.5f, .5f) : 0.f;
+        return double(axis) + offset;
+    };
+    const double x = refine(peak % Width, Width, 1) / (Width - 1);
+    const double y = refine(peak / Width, Height, Width) / (Height - 1);
+    const auto camera = QVector3D((2*x-1)*std::tan(s.config.horizontalFov*Degree/2),
+                                 (1-2*y)*std::tan(s.config.verticalFov*Degree/2), 1).normalized();
     output.values["azimuth_deg"]=std::atan2(camera.x(),camera.z())/Degree;
     output.values["elevation_deg"]=std::atan2(camera.y(),std::hypot(camera.x(),camera.z()))/Degree;
-    output.values["x"]=double(peak%Width)/(Width-1);
-    output.values["y"]=double(peak/Width)/(Height-1);
+    output.values["x"] = x;
+    output.values["y"] = y;
     output.values["state"]="localized";
-    output.arrayDirection=s.arrayDirections[peak];
+    output.arrayDirection=rotateToArray(camera, s.config);
     const auto &array = output.arrayDirection;
     output.values["array_azimuth_deg"] = std::atan2(array.x(), array.z()) / Degree;
     output.values["array_elevation_deg"] = std::atan2(array.y(), std::hypot(array.x(), array.z())) / Degree;
     output.valid=true;
-    if (!targeted && !timeDomain) {
-        output.heatmap = powerHeatmap(scores, *maximum, s.config.dynamicRangeDb);
-        s.previous = scores;
-    }
     return output;
 }
 

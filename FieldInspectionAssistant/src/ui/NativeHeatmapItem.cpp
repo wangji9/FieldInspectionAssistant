@@ -233,12 +233,17 @@ void NativeHeatmapItem::paint(QPainter *p){
         }
         else{
             QTransform transform(graph_.width()/(xmax-xmin),0,0,-graph_.height()/(ymax-ymin),graph_.left()-xmin*graph_.width()/(xmax-xmin),graph_.bottom()+ymin*graph_.height()/(ymax-ymin));
-            auto *service=qobject_cast<SignalAnalysisService*>(source_.data());bool realtime=((service&&service->running())||qobject_cast<AcousticImagingService*>(source_.data()))&&kind!="scatter";p->setRenderHint(QPainter::Antialiasing,!realtime);
-            const bool fastLines=matlabStyle_&&kind=="line";
+            auto *service=qobject_cast<SignalAnalysisService*>(source_.data());
+            const bool acoustic = qobject_cast<AcousticImagingService*>(source_.data()) != nullptr;
+            const bool realtime = (service && service->running()) || acoustic;
+            p->setRenderHint(QPainter::Antialiasing,!realtime);
+            const bool fastLines=(matlabStyle_||acoustic)&&kind=="line";
             if(fastLines){QSize size(qCeil(width()),qCeil(height()));if(curveLayer_.size()!=size)curveLayer_=QImage(size,QImage::Format_ARGB32_Premultiplied);curveLayer_.fill(Qt::transparent);}
+            QPolygonF poly;
             for(int i=0;i<linePoints_.size();i++){
                 QPen pen(lineColors_[i],kind=="scatter"?3.5:matlabStyle_?1.15:realtime?1.:1.3,Qt::SolidLine,matlabStyle_?Qt::RoundCap:realtime?Qt::FlatCap:Qt::RoundCap);pen.setCosmetic(true);pen.setJoinStyle(Qt::RoundJoin);p->setPen(pen);
-                const auto &points=linePoints_[i];QPolygonF poly;
+                const auto &points=linePoints_[i];
+                poly.clear();
                 // Restrict work to the visible interval, retaining boundary neighbours.
                 auto first=kind=="scatter"?points.cbegin():std::lower_bound(points.cbegin(),points.cend(),xmin,[](const QPointF&a,double b){return a.x()<b;});
                 auto last=kind=="scatter"?points.cend():std::upper_bound(points.cbegin(),points.cend(),xmax,[](double a,const QPointF&b){return a<b.x();});
@@ -248,7 +253,10 @@ void NativeHeatmapItem::paint(QPainter *p){
                     auto begin=it,low=it,high=it;int column=int(std::floor(X(it->x())));++it;
                     if(kind!="scatter")while(it!=last&&int(std::floor(X(it->x())))==column){if(it->y()<low->y())low=it;if(it->y()>high->y())high=it;++it;}
                     auto a=low<high?low:high,b=low<high?high:low;
-                    if(begin==first)poly.append(transform.map(*begin));poly.append(transform.map(*a));if(a!=b)poly.append(transform.map(*b));if(it==last&&it-1!=b)poly.append(transform.map(*(it-1)));
+                    if(acoustic ? begin!=a : begin==first)poly.append(transform.map(*begin));
+                    poly.append(transform.map(*a));
+                    if(a!=b)poly.append(transform.map(*b));
+                    if((acoustic||it==last)&&it-1!=b)poly.append(transform.map(*(it-1)));
                 }
                 if(fastLines){for(int k=1;k<poly.size();++k)rasterSegment(curveLayer_,poly[k-1],poly[k],lineColors_[i],graph_);}
                 else if(kind=="scatter")p->drawPoints(poly);else p->drawPolyline(poly);

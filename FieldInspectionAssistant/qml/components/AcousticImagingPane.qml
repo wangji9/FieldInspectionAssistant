@@ -15,6 +15,7 @@ Item {
     readonly property bool cameraCalibrated: parameters.calibrated && App.camera.hasFrame
     readonly property var fields: [
         {id:"gate_dbfs",name:"最低电平 (dBFS)"}, {id:"smoothing",name:"时序平滑"},
+        {id:"lower_hz",name:"SRP 频带下限 (Hz)",srp:true}, {id:"upper_hz",name:"SRP 频带上限 (Hz)",srp:true},
         {id:"temperature",name:"空气温度 (°C)"}, {id:"opacity",name:"热图透明度"},
         {id:"radius_mm",name:"阵列半径 (mm)"}, {id:"channel_one_deg",name:"阵列起点角 (°)"},
         {id:"horizontal_fov",name:"水平视场 (°)"}, {id:"vertical_fov",name:"垂直视场 (°)"},
@@ -95,6 +96,8 @@ Item {
             logImagingStatus()
         } else {
             service.leave()
+            if (camera)
+                camera.clearFrame()
         }
     }
 
@@ -279,8 +282,8 @@ Item {
             width: pageScroll.availableWidth
             height: stacked ? logPanel.y + logPanel.height + padding : desktopHeight
             readonly property bool stacked: width < 800
-            readonly property int padding: 8
-            readonly property int gutter: stacked ? 8 : 16
+            readonly property int padding: 3
+            readonly property int gutter: stacked ? 4 : 8
             readonly property real desktopHeight: Math.max(controls.implicitHeight + viewport.y + padding,
                                                            pageScroll.availableHeight)
             readonly property real innerWidth: Math.max(0, width - 2 * padding)
@@ -294,13 +297,13 @@ Item {
                 y: dashboard.stacked ? viewport.y + viewport.height + dashboard.gutter : viewport.y
                 width: dashboard.leftWidth
                 height: dashboard.stacked ? implicitHeight : dashboard.desktopHeight - y - dashboard.padding
-                spacing: 5
+                spacing: 3
 
                 GridLayout {
                     Layout.fillWidth: true
                     columns: width >= 610 ? 2 : 1
-                    columnSpacing: 8
-                    rowSpacing: 4
+                    columnSpacing: 5
+                    rowSpacing: 3
 
                     RowLayout {
                         Layout.fillWidth: true
@@ -316,11 +319,13 @@ Item {
                                     pane.service.start(cameraChoice.currentIndex >= 0 ? cameraChoice.currentText : "")
                             }
                         }
-                        PanelButton {
-                            objectName: "acousticAlgorithmToggle"
-                            text: pane.parameters.time_domain ? "切换到频域算法" : "切换到时域算法"
+                        PanelCombo {
+                            objectName: "acousticAlgorithmChoice"
+                            Layout.preferredWidth: 138
+                            model: ["单频波束形成", "时域波束形成", "宽带 SRP-PHAT", "单频 MVDR"]
+                            currentIndex: pane.parameters.algorithm
                             enabled: pane.canInspect
-                            onClicked: pane.updateParameter("time_domain", !pane.parameters.time_domain)
+                            onActivated: pane.updateParameter("algorithm", currentIndex)
                         }
                         PanelButton {
                             text: "阵列和声学参数"
@@ -399,7 +404,7 @@ Item {
                 }
 
                 FieldGroup {
-                    title: pane.parameters.time_domain ? "目标频率控制（时域模式下禁用）" : "目标频率控制"
+                    title: pane.parameters.target_frequency_enabled ? "目标频率控制" : "目标频率控制（当前算法禁用）"
                     Layout.fillWidth: true
                     contentItem: RowLayout {
                         spacing: 6
@@ -414,7 +419,7 @@ Item {
                             stepSize: 1
                             snapMode: Slider.SnapAlways
                             value: pane.parameters.target_hz
-                            enabled: pane.canInspect && !pane.parameters.time_domain
+                            enabled: pane.canInspect && pane.parameters.target_frequency_enabled
                             Accessible.name: "目标频率 (Hz)"
                             background: PanelSliderTrack {
                                 x: targetSlider.leftPadding + 6
@@ -434,7 +439,7 @@ Item {
                             from: pane.parameters.target_min_hz
                             to: pane.parameters.target_max_hz
                             value: pane.parameters.target_hz
-                            enabled: pane.canInspect && !pane.parameters.time_domain
+                            enabled: pane.canInspect && pane.parameters.target_frequency_enabled
                             onValueModified: pane.updateParameter("target_hz", value)
                         }
                     }
@@ -523,7 +528,7 @@ Item {
                     analysisSource: pane.service
                     analysisField: "frequency"
                     seriesIndex: plotChannel.currentIndex - 1
-                    referenceX: pane.parameters.time_domain ? NaN : pane.parameters.target_hz
+                    referenceX: pane.parameters.target_frequency_enabled ? pane.parameters.target_hz : NaN
                     manualY: true
                     yMinimum: -115
                     yMaximum: 0
@@ -535,14 +540,12 @@ Item {
                 id: viewport
                 objectName: "acousticVideoViewport"
                 x: dashboard.rightX
-                y: dashboard.padding + mirrorControl.height + 3
+                y: dashboard.padding
                 width: dashboard.rightWidth
                 height: dashboard.stacked ? Math.max(145, Math.round(width * 0.56))
                     : Math.min(dashboard.desktopHeight - y - 114, Math.round(dashboard.desktopHeight * 0.64))
                 color: "#ffffff"
                 clip: true
-                readonly property rect overlayRect: App.camera.hasFrame ? camera.contentRect
-                    : Qt.rect(0, 0, width, height)
                 readonly property bool mirrored: pane.mirrorPreview && App.camera.hasFrame
 
                 Item {
@@ -555,23 +558,13 @@ Item {
                         id: camera
                         anchors.fill: parent
                         fillCrop: true
-                        visible: App.camera.hasFrame
+                        overlayFrame: pane.service.heatmap
+                        overlayOpacity: Number(pane.parameters.opacity)
                         Connections {
                             target: App.camera
                             enabled: pane.visible
                             function onFrameReady(frame) { camera.frame = frame }
                         }
-                    }
-                    CameraPreview {
-                        x: viewport.overlayRect.x
-                        y: viewport.overlayRect.y
-                        width: viewport.overlayRect.width
-                        height: viewport.overlayRect.height
-                        frame: pane.service.heatmap
-                        visible: pane.service.hasHeatmap
-                        frameAspectSize: Qt.size(Math.max(1, Math.round(width)), Math.max(1, Math.round(height)))
-                        smooth: true
-                        opacity: Number(pane.parameters.opacity)
                     }
                 }
 
@@ -581,32 +574,6 @@ Item {
                     text: App.camera.opening ? "正在打开摄像头…" : pane.cameraInUse
                         ? "等待摄像头画面…" : "请选择并打开摄像头"
                     color: "#727272"
-                }
-            }
-
-            Basic.CheckBox {
-                id: mirrorControl
-                objectName: "acousticMirrorPreview"
-                anchors.right: viewport.right
-                y: dashboard.padding
-                height: 19
-                padding: 2
-                text: "相机镜像反转"
-                font.pixelSize: 12
-                checked: pane.mirrorPreview
-                onToggled: pane.mirrorPreview = checked
-                indicator: Rectangle {
-                    x: mirrorControl.leftPadding
-                    y: (mirrorControl.height - height) / 2
-                    width: 13; height: 13
-                    color: "#f9f9f9"
-                    border.color: mirrorControl.activeFocus ? "#557da2" : "#aaaaaa"
-                    Text {
-                        anchors.centerIn: parent
-                        text: "✓"
-                        font.pixelSize: 11
-                        visible: mirrorControl.checked
-                    }
                 }
             }
 
@@ -643,17 +610,43 @@ Item {
                             })
                         }
                     }
-                    PanelLabel {
-                        Layout.fillWidth: true
-                        elide: Text.ElideRight
-                        text: pane.hasLocation
-                            ? (pane.cameraCalibrated ? "镜头" : "阵列") + "方位 / 俯仰  "
-                              + pane.measured(pane.cameraCalibrated ? pane.observation.azimuth_deg : pane.observation.array_azimuth_deg, 1, "°")
-                              + " / " + pane.measured(pane.cameraCalibrated ? pane.observation.elevation_deg : pane.observation.array_elevation_deg, 1, "°")
-                              + "    音画差  " + pane.measured(pane.observation.skew_ms, 0, " ms")
-                            : pane.service.running ? (pane.parameters.time_domain ? "阵列电平  " + pane.measured(pane.observation.level_dbfs, 1, " dBFS")
-                                : "目标频率电平  " + pane.measured(pane.observation.target_dbfs, 1, " dBFS"))
-                              : pane.parameters.calibrated ? "机位已标定" : "参考机位参数 · 待现场标定"
+                    RowLayout {
+                        spacing: 4
+                        PanelLabel {
+                            Layout.fillWidth: true
+                            elide: Text.ElideRight
+                            text: pane.hasLocation
+                                ? (pane.cameraCalibrated ? "镜头" : "阵列") + "方位 / 俯仰  "
+                                  + pane.measured(pane.cameraCalibrated ? pane.observation.azimuth_deg : pane.observation.array_azimuth_deg, 1, "°")
+                                  + " / " + pane.measured(pane.cameraCalibrated ? pane.observation.elevation_deg : pane.observation.array_elevation_deg, 1, "°")
+                                  + "    音画差  " + pane.measured(pane.observation.skew_ms, 0, " ms")
+                                : pane.service.running ? (!pane.parameters.target_frequency_enabled ? "阵列电平  " + pane.measured(pane.observation.level_dbfs, 1, " dBFS")
+                                    : "目标频率电平  " + pane.measured(pane.observation.target_dbfs, 1, " dBFS"))
+                                  : pane.parameters.calibrated ? "机位已标定" : "参考机位参数 · 待现场标定"
+                        }
+                        Basic.CheckBox {
+                            id: mirrorControl
+                            objectName: "acousticMirrorPreview"
+                            Layout.preferredHeight: 19
+                            padding: 2
+                            text: "相机镜像反转"
+                            font.pixelSize: 12
+                            checked: pane.mirrorPreview
+                            onToggled: pane.mirrorPreview = checked
+                            indicator: Rectangle {
+                                x: mirrorControl.leftPadding
+                                y: (mirrorControl.height - height) / 2
+                                width: 13; height: 13
+                                color: "#f9f9f9"
+                                border.color: mirrorControl.activeFocus ? "#557da2" : "#aaaaaa"
+                                Text {
+                                    anchors.centerIn: parent
+                                    text: "✓"
+                                    font.pixelSize: 11
+                                    visible: mirrorControl.checked
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -683,6 +676,7 @@ Item {
                             required property var modelData
                             property alias entry: parameterValue
                             Layout.fillWidth: true
+                            visible: !modelData.srp || pane.parameters.algorithm === 2
                             Label { text: modelData.name; Layout.preferredWidth: 130 }
                             TextField {
                                 id: parameterValue
@@ -734,7 +728,7 @@ Item {
             implicitHeight: 43
             Row {
                 anchors.right: parent.right; anchors.rightMargin: 12; anchors.verticalCenter: parent.verticalCenter
-                spacing: 5
+                spacing: 3
                 TouchButton { text: "取消"; autoWidth: true; height: 30; onClicked: settings.close() }
                 TouchButton { text: "应用参数"; autoWidth: true; height: 30; variant: "primary"; onClicked: pane.applySettings() }
             }
