@@ -36,6 +36,7 @@ QString stateLabel(const QString &state)
     if (state=="diffuse") return QObject::tr("空间响应未形成稳定峰值");
     return state=="localized" ? QObject::tr("声源方向已更新") : QObject::tr("等待六路采样");
 }
+
 }
 
 AcousticImagingService::AcousticImagingService(SignalAnalysisService *audio, CameraService *camera,
@@ -51,7 +52,8 @@ AcousticImagingService::AcousticImagingService(SignalAnalysisService *audio, Cam
     timer_.setInterval(RefreshMs);
     connect(&timer_, &QTimer::timeout, this, &AcousticImagingService::sample);
     connect(&watcher_, &QFutureWatcher<Analysis>::finished, this, &AcousticImagingService::receive);
-    connect(session_, &SessionManager::sessionEnding, this, &AcousticImagingService::stop);
+    connect(session_, &SessionManager::sessionEnding, this, &AcousticImagingService::leave);
+    connect(audio_, &SignalAnalysisService::changed, this, &AcousticImagingService::changed);
     connect(speakers_, &SpeakerRecognitionService::beamClassified, this, [this](quint64 request, const QVariantMap &match) {
         if (!running_ || request!=beamRequest_ || !closeDirection(direction_,voiceDirection_))
             return;
@@ -60,6 +62,8 @@ AcousticImagingService::AcousticImagingService(SignalAnalysisService *audio, Cam
         emit changed();
     });
     connect(camera_, &CameraService::closed, this, [this] {
+        ownsCamera_ = false;
+        keepPreview_ = false;
         observation_["aligned"]=false;
         emit changed();
     });
@@ -67,7 +71,7 @@ AcousticImagingService::AcousticImagingService(SignalAnalysisService *audio, Cam
 
 AcousticImagingService::~AcousticImagingService()
 {
-    stop();
+    leave();
     pool_.waitForDone();
 }
 
@@ -77,6 +81,43 @@ void AcousticImagingService::refresh()
         return;
     cameras_=CameraService::availableDevices();
     emit changed();
+}
+
+bool AcousticImagingService::arrayAvailable() const
+{
+    if (QFileInfo::exists("/dev/lg_speech_serial") && QFileInfo::exists("/dev/lg_speech_uac"))
+        return true;
+    for (const auto &entry : audio_->devices()) {
+        if (entry.toMap().value("id") == SourceId)
+            return true;
+    }
+    return false;
+}
+
+bool AcousticImagingService::openPreview(const QString &cameraPath)
+{
+    if (!session_->can("inspect") || cameraPath.isEmpty() || camera_->isOpen() || camera_->opening() || camera_->closing())
+        return false;
+    ownsCamera_ = evidence_->openCamera(cameraPath);
+    keepPreview_ = ownsCamera_;
+    emit changed();
+    return ownsCamera_;
+}
+
+void AcousticImagingService::closePreview()
+{
+    if (!ownsCamera_)
+        return;
+    ownsCamera_ = false;
+    keepPreview_ = false;
+    evidence_->closeCamera();
+    emit changed();
+}
+
+void AcousticImagingService::leave()
+{
+    stop();
+    closePreview();
 }
 
 bool AcousticImagingService::reject(const QString &message)
@@ -153,6 +194,7 @@ bool AcousticImagingService::configure(const QVariantMap &values)
     ++revision_;
     clearObservation();
     status_=running_ ? tr("参数已更新，重新定位") : tr("参数已保存");
+    emit parametersChanged();
     emit changed();
     return true;
 }
@@ -161,12 +203,10 @@ bool AcousticImagingService::start(const QString &cameraPath)
 {
     if (running_ || !session_->can("inspect"))
         return false;
-    bool rawAvailable=QFileInfo::exists("/dev/lg_speech_serial") && QFileInfo::exists("/dev/lg_speech_uac");
-    for (const auto &entry : audio_->devices())
-        rawAvailable |= entry.toMap().value("id")==SourceId;
     if (!audio_->running()) {
-        if (!rawAvailable) {
+        if (!arrayAvailable()) {
             refresh();
+            audio_->refreshDevices();
             return reject(tr("未发现六麦原始输入。请连接控制口和数据口后刷新。"));
         }
         audio_->start(SourceId);
@@ -176,7 +216,7 @@ bool AcousticImagingService::start(const QString &cameraPath)
     } else if (audio_->sixChannelWindow(.128).captureId.isEmpty()) {
         return reject(tr("当前采集源不是六麦原始输入。请停止后切换。"));
     }
-    if (!cameraPath.isEmpty() && !camera_->isOpen() && !camera_->opening())
+    if (!cameraPath.isEmpty() && !camera_->isOpen() && !camera_->opening() && !camera_->closing())
         ownsCamera_=evidence_->openCamera(cameraPath);
     ++revision_;
     captureId_.clear();
@@ -200,16 +240,19 @@ void AcousticImagingService::stop()
     clearObservation();
     if (ownsAudio_ && audio_->running())
         audio_->stop();
-    if (ownsCamera_)
-        evidence_->closeCamera();
+    if (!keepPreview_)
+        closePreview();
     ownsAudio_=false;
-    ownsCamera_=false;
     status_=tr("已停止");
     emit changed();
 }
 
 void AcousticImagingService::clearObservation()
 {
+    if (!plots_.isEmpty()) {
+        plots_.clear();
+        emit plotsChanged();
+    }
     observation_.clear();
     heatmap_.clear();
     match_.clear();
@@ -269,7 +312,7 @@ void AcousticImagingService::sample()
         result.rate=window.sampleRate;
         if (configure)
             engine->configure(config,window.sampleRate);
-        result.frame=engine->analyze(window.pcm);
+        result.frame=engine->analyze(window.pcm, true);
         if (requestVoice && result.frame.valid && closeDirection(last,result.frame.arrayDirection)) {
             result.beam=engine->beamform(window.pcm,result.frame.arrayDirection);
             result.voiceEndMs=qint64(window.endFrame)*1000/window.sampleRate;
@@ -325,6 +368,8 @@ void AcousticImagingService::receive()
         }
     }
     updateSpeaker();
+    plots_ = frame.plots;
+    emit plotsChanged();
     emit changed();
 }
 

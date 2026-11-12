@@ -9,13 +9,25 @@
 namespace{struct RenderCost{QElapsedTimer timer;double &value;RenderCost(double &v):value(v){timer.start();}~RenderCost(){value=timer.nsecsElapsed()/1e6;}};}
 NativeHeatmapItem::NativeHeatmapItem(QQuickItem *parent):QQuickPaintedItem(parent){setAntialiasing(false);setOpaquePainting(true);connect(this,&NativeHeatmapItem::rangeChanged,this,[this]{update();});connect(this,&QQuickItem::visibleChanged,this,&NativeHeatmapItem::refreshSource);}
 void NativeHeatmapItem::setMatlabStyle(bool value){if(matlabStyle_==value)return;matlabStyle_=value;auto data=plot_;setPlotData(data);emit styleChanged();}
+void NativeHeatmapItem::setDarkStyle(bool value)
+{
+    if (darkStyle_ == value)
+        return;
+    darkStyle_ = value;
+    const auto data = plot_;
+    setPlotData(data);
+    emit styleChanged();
+}
 void NativeHeatmapItem::setAnalysisSource(QObject *source){if(source_==source)return;disconnect(sourceConnection_);source_=source;if(auto *service=qobject_cast<SignalAnalysisService*>(source))sourceConnection_=connect(service,&SignalAnalysisService::snapshotChanged,this,&NativeHeatmapItem::refreshSource);QMetaObject::invokeMethod(this,&NativeHeatmapItem::refreshSource,Qt::QueuedConnection);emit sourceChanged();}
 void NativeHeatmapItem::setAnalysisField(const QString&field){if(field_==field)return;field_=field;QMetaObject::invokeMethod(this,&NativeHeatmapItem::refreshSource,Qt::QueuedConnection);emit sourceChanged();}
 void NativeHeatmapItem::refreshSource(){if(!isVisible())return;if(auto *service=qobject_cast<SignalAnalysisService*>(source_.data())){QVariant value=service->snapshot();for(const auto &key:field_.split('.'))value=value.toMap().value(key);setPlotData(value.toMap());}}
 void NativeHeatmapItem::setPlotData(const QVariantMap &plot){
     RenderCost cost(decodeMs_);
     plot_=plot;linePoints_.clear();lineColors_.clear();double xmin=INFINITY,xmax=-INFINITY,ymin=INFINITY,ymax=-INFINITY;
-    const QStringList palette=matlabStyle_?QStringList{"#0072BD","#D95319","#EDB120","#7E2F8E","#77AC30","#4DBEEE","#A2142F"}:QStringList{"#6D63FF","#0BAE91","#FF65AE","#EF9B41","#4895EF","#9154C6","#6B8B38","#DA6373","#525A89"};
+    const QStringList palette=darkStyle_ ? (plot.value("method_id") == "fft"
+        ? QStringList{"#71e3ff", "#48b4df", "#1f8dff", "#a3f5fa", "#a8b5ff", "#65dbb5"}
+        : QStringList{"#8bf92f", "#57d826", "#c7f956", "#49b53e", "#7cec67", "#2c9738"})
+        : matlabStyle_?QStringList{"#0072BD","#D95319","#EDB120","#7E2F8E","#77AC30","#4DBEEE","#A2142F"}:QStringList{"#6D63FF","#0BAE91","#FF65AE","#EF9B41","#4895EF","#9154C6","#6B8B38","#DA6373","#525A89"};
     for(auto entry:plot.value("series").toList()){auto s=entry.toMap();QPolygonF polygon;auto points=s["points"].toList();polygon.reserve(points.size());for(auto v:points){auto p=v.toList();double x=p.value(0).toDouble(),y=p.value(1).toDouble();if(!std::isfinite(x)||!std::isfinite(y))continue;polygon.append(QPointF(x,y));xmin=qMin(xmin,x);xmax=qMax(xmax,x);ymin=qMin(ymin,y);ymax=qMax(ymax,y);}lineColors_.append(QColor(matlabStyle_?palette[linePoints_.size()%palette.size()]:s.value("color",palette[linePoints_.size()%palette.size()]).toString()));linePoints_.append(polygon);}
     dataBounds_=QRectF(QPointF(xmin,ymin),QPointF(xmax,ymax));auto rows=plot.value("matrix").toList();auto valid=plot.value("validFrames").toList();
     if(rows.isEmpty()){image_=QImage();update();emit plotDataChanged();return;}
@@ -58,18 +70,29 @@ QString NativeHeatmapItem::coordinates(double x,double y)const{
 }
 void NativeHeatmapItem::paint(QPainter *p){
     RenderCost cost(paintMs_);
-    p->fillRect(boundingRect(),QColor("#FFFFFF"));
+    p->fillRect(boundingRect(), darkStyle_ ? Qt::black : Qt::white);
     const auto kind=plot_.value("kind","line").toString();auto series=plot_.value("series").toList(),slices=plot_.value("slices").toList();
     p->setRenderHint(QPainter::Antialiasing,true);QFont font=QGuiApplication::font();font.setPixelSize(matlabStyle_?12:11);p->setFont(font);
-    if(series.isEmpty()&&slices.isEmpty()&&image_.isNull()){
+    if(series.isEmpty()&&slices.isEmpty()&&image_.isNull()&&!darkStyle_){
         const auto error=plot_.value("error").toString();if(!error.isEmpty()){font.setPixelSize(14);p->setFont(font);p->setPen(QColor("#8790A7"));p->drawText(boundingRect().adjusted(20,20,-20,-20),Qt::AlignCenter|Qt::TextWordWrap,error);}return;
     }
     const bool matrix=kind=="heatmap";graph_=QRectF(84,10,qMax(20.,width()-84-(matrix?83:30)),qMax(20.,height()-(matlabStyle_?38:58)));
+    if (darkStyle_) {
+        font.setPixelSize(11);
+        p->setFont(font);
+        graph_ = QRectF(62, 24, qMax(20., width() - 82), qMax(16., height() - 57));
+        p->setPen(Qt::white);
+        p->drawText(QRectF(0, 3, width(), 17), Qt::AlignCenter, plotTitle());
+    }
     double xmin=INFINITY,xmax=-INFINITY,ymin=INFINITY,ymax=-INFINITY;
     if(matrix){auto x=plot_["xRange"].toList(),y=plot_["yRange"].toList();xmin=x.value(0).toDouble();xmax=x.value(1).toDouble();ymin=y.value(0).toDouble();ymax=y.value(1).toDouble();}
     else if(kind=="waterfall"){
         auto datasets=kind=="waterfall"?slices:series;
         for(auto entry:datasets)for(auto point:entry.toMap().value("points").toList()){auto xy=point.toList();double x=xy.value(0).toDouble(),y=xy.value(1).toDouble();xmin=qMin(xmin,x);xmax=qMax(xmax,x);ymin=qMin(ymin,y);ymax=qMax(ymax,y);}
+    }else if (darkStyle_ && series.isEmpty()) {
+        const auto x = plot_.value("xRange").toList(), y = plot_.value("yRange").toList();
+        xmin = x.value(0).toDouble(); xmax = x.value(1).toDouble();
+        ymin = y.value(0).toDouble(); ymax = y.value(1).toDouble();
     }else{xmin=dataBounds_.left();xmax=dataBounds_.right();ymin=dataBounds_.top();ymax=dataBounds_.bottom();}
     if(!std::isfinite(xmin)||!std::isfinite(ymin))return;if(xmax<=xmin)xmax=xmin+1;
     if(!matrix&&plot_.contains("xRange")){auto range=plot_["xRange"].toList();xmin=range.value(0).toDouble();xmax=qMax(xmin+1e-9,range.value(1).toDouble());}
@@ -78,13 +101,13 @@ void NativeHeatmapItem::paint(QPainter *p){
     const bool secondsAxis=plot_.value("xLabel").toString().contains("时间")&&plot_.value("xKind")!="time";
     if(secondsAxis){xmin=std::floor(xmin);xmax=qMax(xmin+1.,std::ceil(xmax));}
     double start=qBound(0.,rangeStart_,.99999),end=qBound(start+.00001,rangeEnd_,1.),span=xmax-xmin;xmax=xmin+span*end;xmin+=span*start;
-    if(manualY_){ymin=yMinimum_;ymax=qMax(ymin+1e-9,yMaximum_);}else if(!matrix){double pad=qMax(1e-12,(ymax-ymin)*.1);if(ymax==ymin)pad=qMax(.001,std::abs(ymin)*.1);ymin-=pad;ymax+=pad;}
+    if(manualY_){ymin=yMinimum_;ymax=qMax(ymin+1e-9,yMaximum_);}else if(!matrix&&!(darkStyle_&&series.isEmpty())){double pad=qMax(1e-12,(ymax-ymin)*.1);if(ymax==ymin)pad=qMax(.001,std::abs(ymin)*.1);ymin-=pad;ymax+=pad;}
     if(ymax<=ymin)ymax=ymin+1;
     xmin_=xmin;xmax_=xmax;ymin_=ymin;ymax_=ymax;
     auto X=[&](double x){return graph_.left()+(x-xmin)/(xmax-xmin)*graph_.width();};
     auto Y=[&](double y){return graph_.bottom()-(y-ymin)/(ymax-ymin)*graph_.height();};
     const bool subsecond=secondsAxis&&xmax-xmin<.999999;
-    const QColor label(matlabStyle_?"#262626":"#7E879D"),grid(matlabStyle_?"#DDDDDD":"#E9EDF5");
+    const QColor label(darkStyle_?"#d5d5d5":matlabStyle_?"#262626":"#7E879D"),grid(darkStyle_?"#2d2d2d":matlabStyle_?"#DDDDDD":"#E9EDF5");
     auto text=[&](double x,double y,const QString&s,int alignment=Qt::AlignCenter){p->setPen(label);p->drawText(QRectF(x-60,y-9,120,18),alignment|Qt::AlignVCenter,s);};
     if(kind=="waterfall"){
         auto project=[&](double f,double t,double z){return QPointF(graph_.left()+graph_.width()*(.78*(f-xmin)/(xmax-xmin)+.2*t),graph_.bottom()-graph_.height()*(.55*(z-ymin)/(ymax-ymin)+.35*t));};
@@ -99,9 +122,31 @@ void NativeHeatmapItem::paint(QPainter *p){
         if(matlabStyle_){p->setPen(label);p->drawText(QRectF(0,graph_.bottom()+9,graph_.left()-14,18),Qt::AlignRight|Qt::AlignVCenter,QStringLiteral("频率 / Hz"));auto anchor=project(xmax,.5,ymin)+QPointF(38,-4);p->save();p->translate(anchor);p->rotate(-55);p->drawText(QRectF(-40,-9,80,18),Qt::AlignCenter,QStringLiteral("时间 / s"));p->restore();}
         else{text(graph_.left()+graph_.width()*.39,height()-8,QStringLiteral("频率 / Hz"));text(graph_.right()-30,graph_.top()+graph_.height()*.55,QStringLiteral("时间 / s"));}
     }else{
-        for(int i=0;i<=4;i++){
-            double x=graph_.left()+graph_.width()*i/4,y=graph_.top()+graph_.height()*i/4;p->setPen(grid);if(!categorical)p->drawLine(QPointF(x,graph_.top()),QPointF(x,graph_.bottom()));p->drawLine(QPointF(graph_.left(),y),QPointF(graph_.right(),y));
-            double value=xmin+(xmax-xmin)*i/4;if(!secondsAxis&&!categorical)text(x,graph_.bottom()+18,plot_.value("xKind")=="time"?QDateTime::fromMSecsSinceEpoch(qint64(value*1000)).toString("hh:mm:ss"):number(value*plot_.value("xDisplayScale",1).toDouble()));p->setPen(label);double yValue=ymax-(ymax-ymin)*i/4;const bool integerY=plot_.value("integerY").toBool()||plot_.value("yLabel").toString().contains("编号");auto yText=integerY?QString::number(qRound64(yValue)):number(yValue);p->drawText(QRectF(23,y-9,graph_.left()-31,18),Qt::AlignRight|Qt::AlignVCenter,yText);
+        const int divisions = darkStyle_ && graph_.height() < 58 ? 2 : 4;
+        for(int i=0;i<=divisions;i++){
+            const double fraction = double(i) / divisions;
+            const double x=graph_.left()+graph_.width()*fraction,y=graph_.top()+graph_.height()*fraction;
+            p->setPen(grid);
+            if(!categorical)p->drawLine(QPointF(x,graph_.top()),QPointF(x,graph_.bottom()));
+            p->drawLine(QPointF(graph_.left(),y),QPointF(graph_.right(),y));
+            const double value=xmin+(xmax-xmin)*fraction;
+            const double scaled=value*plot_.value("xDisplayScale",1).toDouble();
+            if(!secondsAxis&&!categorical)
+                text(x,graph_.bottom()+(darkStyle_?13:18),plot_.value("xKind")=="time"
+                    ? QDateTime::fromMSecsSinceEpoch(qint64(value*1000)).toString("hh:mm:ss")
+                    : darkStyle_ ? QString::number(scaled, 'g', 4) : number(scaled));
+            p->setPen(label);
+            double yValue=ymax-(ymax-ymin)*fraction;
+            if (darkStyle_ && std::abs(yValue) < (ymax - ymin) * .0001)
+                yValue = 0;
+            const bool integerY=plot_.value("integerY").toBool()||plot_.value("yLabel").toString().contains("编号");
+            const auto yText=integerY?QString::number(qRound64(yValue)):darkStyle_?QString::number(yValue,'g',2):number(yValue);
+            p->drawText(QRectF(23,y-9,graph_.left()-(darkStyle_?27:31),18),Qt::AlignRight|Qt::AlignVCenter,yText);
+        }
+        if (darkStyle_) {
+            p->setPen(label);
+            p->drawLine(graph_.topLeft(), graph_.bottomLeft());
+            p->drawLine(graph_.bottomLeft(), graph_.bottomRight());
         }
         if (categorical) {
             const auto tickWidth = qMin(120.0, graph_.width() / (xmax - xmin) - 4.0);

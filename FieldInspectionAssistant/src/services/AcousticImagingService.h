@@ -19,8 +19,11 @@ class AcousticImagingService final : public QObject
     Q_PROPERTY(QString status READ status NOTIFY changed)
     Q_PROPERTY(QString heatmap READ heatmap NOTIFY changed)
     Q_PROPERTY(QVariantMap observation READ observation NOTIFY changed)
-    Q_PROPERTY(QVariantMap parameters READ parameters NOTIFY changed)
+    Q_PROPERTY(QVariantMap parameters READ parameters NOTIFY parametersChanged)
     Q_PROPERTY(QStringList cameras READ cameras NOTIFY changed)
+    Q_PROPERTY(bool ownsPreview READ ownsPreview NOTIFY changed)
+    Q_PROPERTY(bool arrayAvailable READ arrayAvailable NOTIFY changed)
+    Q_PROPERTY(QVariantMap plots READ plots NOTIFY plotsChanged)
 
 public:
     AcousticImagingService(SignalAnalysisService *audio, CameraService *camera, EvidenceService *evidence,
@@ -32,14 +35,22 @@ public:
     QVariantMap observation() const { return observation_; }
     QVariantMap parameters() const { return parameters_; }
     QStringList cameras() const { return cameras_; }
+    bool ownsPreview() const { return ownsCamera_; }
+    bool arrayAvailable() const;
+    QVariantMap plots() const { return plots_; }
 
     Q_INVOKABLE void refresh();
     Q_INVOKABLE bool configure(const QVariantMap &values);
     Q_INVOKABLE bool start(const QString &cameraPath);
     Q_INVOKABLE void stop();
+    Q_INVOKABLE bool openPreview(const QString &cameraPath);
+    Q_INVOKABLE void closePreview();
+    Q_INVOKABLE void leave();
 
 signals:
     void changed();
+    void parametersChanged();
+    void plotsChanged();
 
 private:
     struct Analysis {
@@ -69,11 +80,12 @@ private:
     QFutureWatcher<Analysis> watcher_;
     QTimer timer_;
     AcousticArrayConfig config_;
-    QVariantMap parameters_, observation_, match_;
+    QVariantMap parameters_, observation_, match_, plots_;
     QString captureId_, status_, heatmap_;
     QStringList cameras_;
     QVector3D direction_, stableDirection_, voiceDirection_;
     quint64 revision_ = 1, engineRevision_ = 0, lastFrame_ = 0, stableSince_ = 0, lastVoice_ = 0, beamRequest_ = 0;
     qint64 lastReceived_ = 0, lastLocalized_ = 0, voiceCaptured_ = 0, voiceFrom_ = 0, voiceTo_ = 0;
     bool running_ = false, ownsAudio_ = false, ownsCamera_ = false, computing_ = false;
+    bool keepPreview_ = false;
 };

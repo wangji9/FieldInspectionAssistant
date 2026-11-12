@@ -35,8 +35,8 @@ QVector3D rotateToArray(const QVector3D &v, const AcousticArrayConfig &c)
 
 QRgb palette(float value)
 {
-    constexpr std::array<std::array<int,3>,6> rgb{{
-        {38,44,118}, {37,103,165}, {37,152,176}, {58,176,146}, {173,191,79}, {246,208,55}
+    constexpr std::array<std::array<int,3>,7> rgb{{
+        {0,0,128}, {0,0,255}, {0,219,255}, {84,255,104}, {255,255,0}, {255,104,0}, {187,0,0}
     }};
     const float n = std::clamp(value,0.f,1.f)*(rgb.size()-1);
     const int first = std::min(int(n),int(rgb.size()-2));
@@ -50,6 +50,41 @@ qint16 sample(const QByteArray &pcm,int frame,int channel)
 {
     return qFromLittleEndian<qint16>(pcm.constData()+2*(frame*MicCount+channel));
 }
+
+QVariantMap capturePlots(const QByteArray &pcm, int start, int rate,
+                         const std::array<cv::Mat, MicCount> &spectra, double windowSum)
+{
+    QVariantList timeSeries, frequencySeries;
+    for (int mic = 0; mic < MicCount; ++mic) {
+        QVariantList time, frequency;
+        // Retain the extrema in each four-sample block in acquisition order.
+        time.reserve(N / 2);
+        for (int frame = 0; frame < N; frame += 4) {
+            std::array<qint16, 4> block;
+            for (int i = 0; i < 4; ++i)
+                block[i] = sample(pcm, start + frame + i, mic);
+            const auto [low, high] = std::minmax_element(block.cbegin(), block.cend());
+            for (const auto point : {std::min(low, high), std::max(low, high)})
+                time.append(QVariant(QVariantList{double(frame + (point - block.cbegin())) / rate, *point / 32768.}));
+        }
+        frequency.reserve(N / 2 + 1);
+        const auto *bins = spectra[mic].ptr<cv::Vec2f>();
+        for (int bin = 0; bin <= N / 2; ++bin) {
+            const int scale = bin == 0 || bin == N / 2 ? 1 : 2;
+            const double magnitude = scale * std::hypot(bins[bin][0], bins[bin][1]) / windowSum;
+            frequency.append(QVariant(QVariantList{double(bin) * rate / N, 20 * std::log10(std::max(1e-6, magnitude))}));
+        }
+        timeSeries.append(QVariantMap{{"points", time}});
+        frequencySeries.append(QVariantMap{{"points", frequency}});
+    }
+    return {
+        {"time", QVariantMap{{"series", timeSeries}, {"xRange", QVariantList{0, double(N) / rate}},
+            {"xLabel", QStringLiteral("采样时长 (ms)")}, {"xDisplayScale", 1000.},
+            {"yLabel", QStringLiteral("幅值 (FS)")}}},
+        {"frequency", QVariantMap{{"series", frequencySeries}, {"xRange", QVariantList{0, rate / 2.}},
+            {"xLabel", QStringLiteral("频率 (Hz)")}, {"yLabel", QStringLiteral("幅值 (dBFS)")}, {"method_id", "fft"}}}
+    };
+}
 }
 
 struct AcousticImagingEngine::State {
@@ -60,6 +95,7 @@ struct AcousticImagingEngine::State {
     std::array<QVector3D,MicCount> positions;
     std::array<std::pair<int,int>,PairCount> pairs;
     std::array<float,N> window;
+    double windowSum = 0;
     std::array<cv::Mat,MicCount> input, spectra;
     std::array<cv::Mat,PairCount> correlations;
     cv::Mat cross;
@@ -77,6 +113,7 @@ struct AcousticImagingEngine::State {
                 pairs[p++]={i,j};
         for (int i=0;i<N;++i)
             window[i]=0.5f-0.5f*std::cos(2*Pi*i/(N-1));
+        windowSum = std::accumulate(window.cbegin(), window.cend(), 0.);
     }
 };
 
@@ -118,7 +155,7 @@ void AcousticImagingEngine::configure(const AcousticArrayConfig &configuration,i
     }
 }
 
-AcousticImageFrame AcousticImagingEngine::analyze(const QByteArray &pcm)
+AcousticImageFrame AcousticImagingEngine::analyze(const QByteArray &pcm, bool includePlots)
 {
     AcousticImageFrame output;
     auto &s=*state_;
@@ -145,14 +182,20 @@ AcousticImageFrame AcousticImagingEngine::analyze(const QByteArray &pcm)
         levels.append(dbfs(sum,N));
     const auto level=dbfs(std::accumulate(squares.cbegin(),squares.cend(),0.),N*MicCount);
     output.values={{"level_dbfs",level},{"channels_dbfs",levels}};
-    if (level<s.config.gateDbfs || std::count(distinct.begin(),distinct.end(),true)<3) {
+    const bool belowGate = level < s.config.gateDbfs;
+    const bool duplicate = std::count(distinct.begin(), distinct.end(), true) < 3;
+    if (includePlots || (!belowGate && !duplicate)) {
+        for (int i = 0; i < MicCount; ++i)
+            cv::dft(s.input[i], s.spectra[i], cv::DFT_COMPLEX_OUTPUT);
+    }
+    if (includePlots)
+        output.plots = capturePlots(pcm, start, s.sampleRate, s.spectra, s.windowSum);
+    if (belowGate || duplicate) {
         s.previous.clear();
-        output.values["state"]=level<s.config.gateDbfs ? "below_gate" : "duplicate_channels";
+        output.values["state"] = belowGate ? "below_gate" : "duplicate_channels";
         return output;
     }
 
-    for (int i=0;i<MicCount;++i)
-        cv::dft(s.input[i],s.spectra[i],cv::DFT_COMPLEX_OUTPUT);
     const float scale=CorrelationSize/(2.f*(s.lastBin-s.firstBin+1));
     for (int p=0;p<PairCount;++p) {
         const auto [i,j]=s.pairs[p];

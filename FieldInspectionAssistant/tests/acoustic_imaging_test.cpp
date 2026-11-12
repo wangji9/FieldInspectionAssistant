@@ -3,6 +3,7 @@
 #include <QCoreApplication>
 #include <QDebug>
 #include <QtEndian>
+#include <algorithm>
 #include <cmath>
 #include <random>
 
@@ -73,5 +74,34 @@ int main(int argc,char **argv)
     const auto corrected=engine.analyze(source(20,4,geometry.radiusMm));
     if (!corrected.valid || std::abs(corrected.values.value("azimuth_deg").toDouble()-5)>4)
         return 4;
+
+    constexpr int channels = AcousticImagingEngine::Channels;
+    QByteArray tones(AcousticImagingEngine::Window * channels * 2, Qt::Uninitialized);
+    for (int frame = 0; frame < AcousticImagingEngine::Window; ++frame) {
+        for (int channel = 0; channel < channels; ++channel) {
+            const int hz = 1000 + 125 * channel;
+            const auto amplitude = qint16(std::lround(16384 * std::sin(2 * Pi * hz * frame / Rate)));
+            qToLittleEndian<qint16>(amplitude, tones.data() + 2 * (frame * channels + channel));
+        }
+    }
+    const auto plots = engine.analyze(tones, true).plots;
+    const auto time = plots.value("time").toMap().value("series").toList();
+    const auto frequency = plots.value("frequency").toMap().value("series").toList();
+    if (time.size() != channels || frequency.size() != channels)
+        return 5;
+    for (int channel = 0; channel < channels; ++channel) {
+        const auto points = frequency.at(channel).toMap().value("points").toList();
+        if (points.size() != AcousticImagingEngine::Window / 2 + 1 ||
+            time.at(channel).toMap().value("points").toList().isEmpty())
+            return 6;
+        const auto peak = std::max_element(points.cbegin(), points.cend(), [](const QVariant &a, const QVariant &b) {
+            return a.toList().at(1).toDouble() < b.toList().at(1).toDouble();
+        })->toList();
+        if (peak.at(0).toDouble() != 1000 + 125 * channel || std::abs(peak.at(1).toDouble() + 6.02) > .1)
+            return 7;
+    }
+    const auto quiet = engine.analyze(silence, true);
+    if (quiet.valid || quiet.plots.isEmpty())
+        return 8;
     return 0;
 }

@@ -25,6 +25,7 @@ struct AcousticImageFrame {
     QImage heatmap;
     QVector3D arrayDirection;
     QVariantMap values;
+    QVariantMap plots;
 };
 
 class AcousticImagingEngine {
@@ -34,7 +35,7 @@ public:
     AcousticImagingEngine();
     ~AcousticImagingEngine();
     void configure(const AcousticArrayConfig &configuration, int sampleRate);
-    AcousticImageFrame analyze(const QByteArray &interleaved);
+    AcousticImageFrame analyze(const QByteArray &interleaved, bool includePlots = false);
     QByteArray beamform(const QByteArray &interleaved, const QVector3D &direction) const;
 
 private:
