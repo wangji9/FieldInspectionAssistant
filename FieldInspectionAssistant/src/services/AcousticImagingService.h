@@ -17,7 +17,7 @@ class AcousticImagingService final : public QObject
     Q_OBJECT
     Q_PROPERTY(bool running READ running NOTIFY changed)
     Q_PROPERTY(QString status READ status NOTIFY changed)
-    Q_PROPERTY(QString heatmap READ heatmap NOTIFY changed)
+    Q_PROPERTY(QImage heatmap READ heatmap NOTIFY changed)
     Q_PROPERTY(QVariantMap observation READ observation NOTIFY changed)
     Q_PROPERTY(QVariantMap parameters READ parameters NOTIFY parametersChanged)
     Q_PROPERTY(QStringList cameras READ cameras NOTIFY changed)
@@ -31,13 +31,14 @@ public:
     ~AcousticImagingService() override;
     bool running() const { return running_; }
     QString status() const { return status_; }
-    QString heatmap() const { return heatmap_; }
+    QImage heatmap() const { return heatmap_; }
     QVariantMap observation() const { return observation_; }
     QVariantMap parameters() const { return parameters_; }
     QStringList cameras() const { return cameras_; }
     bool ownsPreview() const { return ownsCamera_; }
     bool arrayAvailable() const;
     QVariantMap plots() const { return plots_; }
+    QVariantMap plotForDisplay(const QString &kind, int channel) const;
 
     Q_INVOKABLE void refresh();
     Q_INVOKABLE bool configure(const QVariantMap &values);
@@ -65,7 +66,7 @@ private:
 
     void sample();
     void receive();
-    void clearObservation();
+    void clearObservation(bool clearPlots = true);
     void updateSpeaker();
     bool adopt(const QVariantMap &values);
     bool reject(const QString &text);
@@ -81,11 +82,13 @@ private:
     QTimer timer_;
     AcousticArrayConfig config_;
     QVariantMap parameters_, observation_, match_, plots_;
-    QString captureId_, status_, heatmap_;
+    QString captureId_, status_;
+    QImage heatmap_;
     QStringList cameras_;
     QVector3D direction_, stableDirection_, voiceDirection_;
     quint64 revision_ = 1, engineRevision_ = 0, lastFrame_ = 0, stableSince_ = 0, lastVoice_ = 0, beamRequest_ = 0;
     qint64 lastReceived_ = 0, lastLocalized_ = 0, voiceCaptured_ = 0, voiceFrom_ = 0, voiceTo_ = 0;
+    qint64 lastPlotMs_ = 0;
     bool running_ = false, ownsAudio_ = false, ownsCamera_ = false, computing_ = false;
     bool keepPreview_ = false;
 };

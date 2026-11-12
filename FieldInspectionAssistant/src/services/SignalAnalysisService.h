@@ -55,6 +55,7 @@ public:
     bool discovering()const{return discovering_;}
     QString deviceStatus()const{return deviceStatus_;}
     Q_INVOKABLE void start(const QString &source);
+    void startAcousticCapture(const QString &source);
     Q_INVOKABLE void stop();
     Q_INVOKABLE void configure(const QString &method,int channel,double window,const QVariantMap &options=QVariantMap());
     Q_INVOKABLE void importFile(const QString &path);
@@ -64,6 +65,7 @@ signals:
     void changed();void snapshotChanged();void trendsChanged();void saved(const QString &path);
     void recordingOperationFinished(bool ok,const QString &message);
 private:
+    void startNative(const QString &source, bool acousticCapture);
     std::function<bool()> reportGuard_;
     void send(const QJsonObject &object);void read();
     void publishNative();void finishNative();

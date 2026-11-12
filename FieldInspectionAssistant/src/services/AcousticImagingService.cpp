@@ -5,19 +5,19 @@
 #include "SpeakerRecognitionService.h"
 #include "../app/SessionManager.h"
 
-#include <QBuffer>
 #include <QDateTime>
 #include <QFileInfo>
 #include <QSettings>
+#include <QTransform>
 #include <QtConcurrentRun>
 #include <algorithm>
 #include <cmath>
 
 namespace {
 constexpr float StableDirection = .98480775f; // cos(10 degrees)
-constexpr qint64 RefreshMs = 120;
+constexpr qint64 RefreshMs = 80;
+constexpr qint64 PlotRefreshMs = 200;
 constexpr qint64 AudioExpiryMs = 800;
-constexpr qint64 AudioVideoGapMs = 450;
 constexpr qint64 LocalizationGapMs = 340;
 constexpr double VoiceWindow = 3.3;
 constexpr double VoiceInterval = 1.8;
@@ -34,6 +34,8 @@ QString stateLabel(const QString &state)
     if (state=="below_gate") return QObject::tr("低于电平门限");
     if (state=="duplicate_channels") return QObject::tr("六路采样重复，无法定位");
     if (state=="diffuse") return QObject::tr("空间响应未形成稳定峰值");
+    if (state=="target_absent") return QObject::tr("目标频率没有足够信号");
+    if (state=="ambiguous") return QObject::tr("目标频率存在多个相近峰值");
     return state=="localized" ? QObject::tr("声源方向已更新") : QObject::tr("等待六路采样");
 }
 
@@ -94,11 +96,31 @@ bool AcousticImagingService::arrayAvailable() const
     return false;
 }
 
+QVariantMap AcousticImagingService::plotForDisplay(const QString &kind, int channel) const
+{
+    const bool frequency = kind == "frequency";
+    auto plot = plots_.value(kind).toMap();
+    if (plot.isEmpty()) {
+        const auto rate = AcousticImagingEngine::SampleRate;
+        plot = frequency
+            ? QVariantMap{{"xLabel", tr("频率 (Hz)")}, {"yLabel", tr("幅值 (dBFS)")},
+                {"xRange", QVariantList{0, rate / 2.}}, {"yRange", QVariantList{-115, 0}}}
+            : QVariantMap{{"xLabel", tr("采样时长 (ms)")}, {"yLabel", tr("幅值 (FS)")},
+                {"xRange", QVariantList{0, double(AcousticImagingEngine::Window) / rate}},
+                {"xDisplayScale", 1000.}, {"yRange", QVariantList{-1, 1}}};
+    }
+    plot["title"] = frequency ? tr("频谱图") : tr("时域信号");
+    const auto series = plot.value("series").toList();
+    if (channel >= 0 && channel < series.size())
+        plot["series"] = QVariantList{series.at(channel)};
+    return plot;
+}
+
 bool AcousticImagingService::openPreview(const QString &cameraPath)
 {
     if (!session_->can("inspect") || cameraPath.isEmpty() || camera_->isOpen() || camera_->opening() || camera_->closing())
         return false;
-    ownsCamera_ = evidence_->openCamera(cameraPath);
+    ownsCamera_ = camera_->openNativePreview(cameraPath);
     keepPreview_ = ownsCamera_;
     emit changed();
     return ownsCamera_;
@@ -148,6 +170,8 @@ bool AcousticImagingService::adopt(const QVariantMap &values)
     next.temperature=number("temperature",next.temperature,-25,60);
     next.lowerHz=int(number("lower_hz",next.lowerHz,80,5500));
     next.upperHz=int(number("upper_hz",next.upperHz,200,7400));
+    next.targetHz = int(number("target_hz", (next.lowerHz + next.upperHz) / 2,
+        AcousticImagingEngine::MinimumTargetHz, AcousticImagingEngine::MaximumTargetHz));
     next.gateDbfs=number("gate_dbfs",next.gateDbfs,-100,-12);
     next.smoothing=number("smoothing",next.smoothing,0,.95);
     const auto opacity=number("opacity",.56,.08,.95);
@@ -175,7 +199,9 @@ bool AcousticImagingService::adopt(const QVariantMap &values)
     parameters_={{"radius_mm",next.radiusMm},{"channel_one_deg",next.channelOneDegrees},{"clockwise",next.clockwise},
         {"channel_order",orderText.join(',')},{"horizontal_fov",next.horizontalFov},{"vertical_fov",next.verticalFov},
         {"yaw",next.yaw},{"pitch",next.pitch},{"roll",next.roll},{"temperature",next.temperature},
-        {"lower_hz",next.lowerHz},{"upper_hz",next.upperHz},{"gate_dbfs",next.gateDbfs},{"smoothing",next.smoothing},
+        {"lower_hz",next.lowerHz},{"upper_hz",next.upperHz},{"target_hz",next.targetHz},
+        {"target_min_hz",AcousticImagingEngine::MinimumTargetHz},{"target_max_hz",AcousticImagingEngine::MaximumTargetHz},
+        {"gate_dbfs",next.gateDbfs},{"smoothing",next.smoothing},
         {"opacity",opacity},{"speaker_threshold",threshold},{"speaker",values.value("speaker",true).toBool()},
         {"calibrated",values.value("calibrated",false).toBool()},{"positions",positions}};
     return true;
@@ -192,7 +218,7 @@ bool AcousticImagingService::configure(const QVariantMap &values)
         return reject(tr("请检查频带、阵列尺寸和通道顺序。通道 1–6 每个只能出现一次。"));
     QSettings().setValue(SettingsKey,parameters_);
     ++revision_;
-    clearObservation();
+    clearObservation(!running_);
     status_=running_ ? tr("参数已更新，重新定位") : tr("参数已保存");
     emit parametersChanged();
     emit changed();
@@ -209,7 +235,7 @@ bool AcousticImagingService::start(const QString &cameraPath)
             audio_->refreshDevices();
             return reject(tr("未发现六麦原始输入。请连接控制口和数据口后刷新。"));
         }
-        audio_->start(SourceId);
+        audio_->startAcousticCapture(SourceId);
         if (!audio_->running())
             return reject(audio_->message());
         ownsAudio_=true;
@@ -217,7 +243,7 @@ bool AcousticImagingService::start(const QString &cameraPath)
         return reject(tr("当前采集源不是六麦原始输入。请停止后切换。"));
     }
     if (!cameraPath.isEmpty() && !camera_->isOpen() && !camera_->opening() && !camera_->closing())
-        ownsCamera_=evidence_->openCamera(cameraPath);
+        ownsCamera_=camera_->openNativePreview(cameraPath);
     ++revision_;
     captureId_.clear();
     lastFrame_=0;
@@ -247,14 +273,15 @@ void AcousticImagingService::stop()
     emit changed();
 }
 
-void AcousticImagingService::clearObservation()
+void AcousticImagingService::clearObservation(bool clearPlots)
 {
-    if (!plots_.isEmpty()) {
+    if (clearPlots && !plots_.isEmpty()) {
         plots_.clear();
         emit plotsChanged();
     }
     observation_.clear();
-    heatmap_.clear();
+    heatmap_ = {};
+    lastPlotMs_ = 0;
     match_.clear();
     direction_={};
     stableDirection_={};
@@ -283,7 +310,7 @@ void AcousticImagingService::sample()
         reject(tr("六麦数据已中断，等待新的采样"));
     }
     const bool speaker=parameters_.value("speaker").toBool();
-    const auto rate=16000;
+    const auto rate=AcousticImagingEngine::SampleRate;
     const bool requestVoice=speaker && stableSince_ && lastFrame_>=stableSince_+quint64(rate*VoiceWindow) &&
         lastFrame_>=lastVoice_+quint64(rate*VoiceInterval) && speakers_->canClassifyBeam();
     auto window=audio_->sixChannelWindow(requestVoice ? VoiceWindow : .128);
@@ -301,10 +328,13 @@ void AcousticImagingService::sample()
     lastReceived_=window.receivedMs;
     const auto revision=revision_;
     const bool configure=engineRevision_!=revision;
+    const bool includePlots = !lastPlotMs_ || now - lastPlotMs_ >= PlotRefreshMs;
+    if (includePlots)
+        lastPlotMs_ = now;
     engineRevision_=revision;
     computing_=true;
     watcher_.setFuture(QtConcurrent::run(&pool_,[engine=engine_,window=std::move(window),revision,configure,
-                                                config=config_,requestVoice,last=stableDirection_] {
+                                                config=config_,requestVoice,last=stableDirection_,includePlots] {
         Analysis result;
         result.revision=revision;
         result.endFrame=window.endFrame;
@@ -312,7 +342,7 @@ void AcousticImagingService::sample()
         result.rate=window.sampleRate;
         if (configure)
             engine->configure(config,window.sampleRate);
-        result.frame=engine->analyze(window.pcm, true);
+        result.frame=engine->analyze(window.pcm, includePlots);
         if (requestVoice && result.frame.valid && closeDirection(last,result.frame.arrayDirection)) {
             result.beam=engine->beamform(window.pcm,result.frame.arrayDirection);
             result.voiceEndMs=qint64(window.endFrame)*1000/window.sampleRate;
@@ -335,12 +365,8 @@ void AcousticImagingService::receive()
     observation_["timestamp"]=QDateTime::fromMSecsSinceEpoch(midpoint,Qt::UTC).toString(Qt::ISODateWithMs);
     observation_["audio_frame"]=QVariant::fromValue(result.endFrame);
     observation_["audio_ms"]=qint64(result.endFrame)*1000/result.rate;
-    const auto cameraStamp=camera_->frameCapturedMs();
-    const auto skew=cameraStamp-midpoint;
-    observation_["aligned"]=frame.valid && camera_->hasFrame() && cameraStamp>0 && std::abs(skew)<=AudioVideoGapMs;
-    if (cameraStamp>0)
-        observation_["skew_ms"]=skew;
-    heatmap_.clear();
+    observation_["audio_midpoint_ms"] = midpoint;
+    heatmap_ = {};
     const bool gap=result.receivedMs-lastLocalized_>LocalizationGapMs;
     if (gap || (frame.valid && !closeDirection(frame.arrayDirection,stableDirection_))) {
         stableSince_=frame.valid ? result.endFrame : 0;
@@ -352,10 +378,21 @@ void AcousticImagingService::receive()
     if (frame.valid) {
         direction_=frame.arrayDirection;
         lastLocalized_=result.receivedMs;
-        QByteArray png;
-        QBuffer buffer(&png);
-        if (buffer.open(QIODevice::WriteOnly) && frame.heatmap.save(&buffer,"PNG"))
-            heatmap_="data:image/png;base64,"+QString::fromLatin1(png.toBase64());
+        heatmap_ = frame.heatmap;
+        const bool mirrored = camera_->hasFrame() && camera_->frameMirrored();
+        const int rotation = camera_->hasFrame() ? camera_->frameRotation() : 0;
+        auto x = observation_.value("x").toDouble();
+        const auto y = observation_.value("y").toDouble();
+        if (mirrored) {
+            x = 1 - x;
+            heatmap_ = heatmap_.mirrored(true, false);
+        }
+        if (rotation)
+            heatmap_ = heatmap_.transformed(QTransform().rotate(rotation));
+        observation_["x"] = rotation == 90 ? 1 - y : rotation == 180 ? 1 - x : rotation == 270 ? y : x;
+        observation_["y"] = rotation == 90 ? x : rotation == 180 ? 1 - y : rotation == 270 ? 1 - x : y;
+        observation_["camera_rotation"] = rotation;
+        observation_["camera_mirrored"] = mirrored;
         observation_["array_x"]=direction_.x();
         observation_["array_y"]=direction_.y();
         if (!result.beam.isEmpty() && speakers_->classifyBeam(result.beam,
@@ -368,8 +405,10 @@ void AcousticImagingService::receive()
         }
     }
     updateSpeaker();
-    plots_ = frame.plots;
-    emit plotsChanged();
+    if (!frame.plots.isEmpty()) {
+        plots_ = frame.plots;
+        emit plotsChanged();
+    }
     emit changed();
 }
 

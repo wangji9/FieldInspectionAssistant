@@ -9,7 +9,18 @@ struct PreviewNode:QSGNode {
 };
 }
 CameraPreviewItem::CameraPreviewItem(QQuickItem *parent):QQuickItem(parent){setFlag(ItemHasContents,true);connect(this,&QQuickItem::visibleChanged,this,[this]{if(isVisible())update();});connect(this,&QQuickItem::smoothChanged,this,[this]{update();});}
-void CameraPreviewItem::setFrame(const QImage&frame){if(frame.cacheKey()==frame_.cacheKey())return;frame_=frame;if(isVisible())update();emit frameChanged();emit contentRectChanged();}
+void CameraPreviewItem::setFrame(const QImage &frame)
+{
+    if (frame.cacheKey() == frame_.cacheKey())
+        return;
+    const bool geometryChanged = !frameAspectSize_.isValid() && frame.size() != frame_.size();
+    frame_ = frame;
+    if (isVisible())
+        update();
+    emit frameChanged();
+    if (geometryChanged)
+        emit contentRectChanged();
+}
 void CameraPreviewItem::setFillCrop(bool fill)
 {
     if (fillCrop_ == fill)

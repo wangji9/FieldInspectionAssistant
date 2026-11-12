@@ -16,6 +16,7 @@ struct AcousticArrayConfig {
     double yaw = 0.0, pitch = 0.0, roll = 0.0;
     double temperature = 20.0;
     int lowerHz = 450, upperHz = 3800;
+    int targetHz = 0;
     double gateDbfs = -55.0;
     double smoothing = 0.55;
 };
@@ -32,6 +33,9 @@ class AcousticImagingEngine {
 public:
     static constexpr int Channels = 6;
     static constexpr int Window = 2048;
+    static constexpr int SampleRate = 16000;
+    static constexpr int MinimumTargetHz = 80;
+    static constexpr int MaximumTargetHz = 7400;
     AcousticImagingEngine();
     ~AcousticImagingEngine();
     void configure(const AcousticArrayConfig &configuration, int sampleRate);

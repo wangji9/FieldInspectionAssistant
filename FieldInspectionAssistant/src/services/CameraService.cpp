@@ -61,23 +61,25 @@ bool CameraService::openCapture(const QString&path,bool nativePreview){
 }
 void CameraService::closeDevice(){
     if(recording_)stopVideo();if(!capture_)return;closing_=true;opening_=false;connected_=false;capture_->requestInterruption();
-    lastFrame_=QImage();emit frameReady(lastFrame_);emit stateChanged();emit closed();setStatus(finalizing_?"正在关闭摄像头并保存录像…":"正在关闭摄像头…");
+    lastFrame_=QImage();frameCapturedMs_=0;emit frameMetadataChanged();emit frameReady(lastFrame_);emit stateChanged();emit closed();setStatus(finalizing_?"正在关闭摄像头并保存录像…":"正在关闭摄像头…");
 }
 void CameraService::captureFinished(){
     QString failure;if(store_){QMutexLocker lock(&store_->mutex);failure=store_->error;}
     if(recording_)stopVideo();previewTimer_.stop();connected_=false;opening_=false;closing_=false;lastFrame_=QImage();
-    capture_->deleteLater();capture_=nullptr;store_.reset();emit frameReady(lastFrame_);emit closed();emit stateChanged();
+    capture_->deleteLater();capture_=nullptr;store_.reset();frameCapturedMs_=0;emit frameMetadataChanged();emit frameReady(lastFrame_);emit closed();emit stateChanged();
     if(!failure.isEmpty()){setStatus(failure);emit error(failure);}else if(!finalizing_)setStatus("摄像头已关闭");
 }
 void CameraService::refreshPreview(){
     if(!store_||closing_)return;QImage frame;bool active=false;quint64 sequence;qint64 capturedMs=0;QVariantMap values;
-    {QMutexLocker lock(&store_->mutex);active=store_->opened;sequence=store_->sequence;if(sequence!=sequence_){frame=store_->preview;capturedMs=store_->previewCapturedMs;}
+    int rotation = 0;
+    bool mirrored = false;
+    {QMutexLocker lock(&store_->mutex);active=store_->opened;sequence=store_->sequence;if(sequence!=sequence_){frame=store_->preview;capturedMs=store_->previewCapturedMs;rotation=store_->previewRotation;mirrored=store_->previewMirrored;}
         if (sender() == capture_) store_->previewNotificationPending = false;
         if(opening_&&active){width_=store_->width;height_=store_->height;fps_=store_->fps;}
         if(statsClock_.elapsed()>=1000)values={{"capture_frames",QVariant::fromValue(store_->captured)},{"decoded_frames",QVariant::fromValue(store_->decoded)},{"stale_frames",QVariant::fromValue(store_->stale)},{"invalid_frames",QVariant::fromValue(store_->invalid)},{"decode_ms",store_->decodeMs},{"preview_fps",store_->actualFps},{"preview_width",store_->preview.width()},{"preview_height",store_->preview.height()},{"native",true}};
     }
     if(opening_&&active){opening_=false;connected_=true;emit settingsChanged();emit stateChanged();emit opened();setStatus("摄像头已打开 · 实时画面");}
-    if(!frame.isNull()){bool first=lastFrame_.isNull();sequence_=sequence;lastFrame_=frame;frameCapturedMs_=capturedMs;emit frameReady(lastFrame_);if(first)emit stateChanged();}
+    if(!frame.isNull()){bool first=lastFrame_.isNull();sequence_=sequence;lastFrame_=frame;frameCapturedMs_=capturedMs;frameRotation_=rotation;frameMirrored_=mirrored;emit frameMetadataChanged();emit frameReady(lastFrame_);if(first)emit stateChanged();}
     if(!values.isEmpty()){statsClock_.restart();metrics_=values;emit metricsChanged();if(recording_)emit recordingChanged();}
     if(recording_&&recordClock_.elapsed()>=maxVideoSeconds_*1000)stopVideo();
 }

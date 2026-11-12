@@ -49,7 +49,17 @@ void SignalAnalysisService::send(const QJsonObject &o){
     if(worker_.state()!=QProcess::Running){message_=QStringLiteral("请先刷新，等待分析服务就绪");emit changed();return;}
     auto command=o;command["reply_user"]=session_->userId();worker_.write(QJsonDocument(command).toJson(QJsonDocument::Compact)+'\n');
 }
-void SignalAnalysisService::start(const QString &source){
+void SignalAnalysisService::start(const QString &source)
+{
+    startNative(source, false);
+}
+
+void SignalAnalysisService::startAcousticCapture(const QString &source)
+{
+    startNative(source, true);
+}
+
+void SignalAnalysisService::startNative(const QString &source, bool acousticCapture){
     if(reportGuard_&&reportGuard_()){message_=QStringLiteral("请先结束语音对话或声学评价报告，再开始采集");emit changed();return;}
     if(!session_->can("inspect")||capture_||recordingBusy_||exportBusy())return;
     QVariantMap device;for(auto v:devices_)if(v.toMap()["id"].toString()==source)device=v.toMap();
@@ -61,7 +71,15 @@ void SignalAnalysisService::start(const QString &source){
     snapshot_.clear();emit snapshotChanged();
     captureGeneration_++;featurePending_=false;capture_=new NativeAudioCapture(device,folder_,this);
     auto registered=catalog_->beginCapture(capture_->info());if(!registered.value("ok").toBool()){delete capture_;capture_=nullptr;message_=registered.value("error").toString();emit changed();return;}reloadRecordings();
-    analyzer_=new NativeSignalAnalyzer(capture_,folder_,this);analyzer_->configure(method_,channel_,window_,options_);
+    analyzer_=new NativeSignalAnalyzer(capture_,folder_,this);
+    auto captureOptions = options_;
+    if (acousticCapture) {
+        // Acoustic imaging computes its own synchronized six-channel plots.
+        captureOptions.remove("pairedPlots");
+        captureOptions.remove("previewChannels");
+    }
+    analyzer_->configure(acousticCapture ? QStringLiteral("time") : method_, channel_,
+                         acousticCapture ? .128 : window_, captureOptions);
     connect(capture_,&QThread::finished,this,&SignalAnalysisService::finishNative);
     running_=true;message_=QStringLiteral("C++ 原生采集正在启动");measurementClock_.start();capture_->start();analyzer_->start();frameTimer_.start();emit changed();
 }

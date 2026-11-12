@@ -15,6 +15,9 @@ class CameraService final : public QObject {
     Q_PROPERTY(bool opening READ opening NOTIFY stateChanged)
     Q_PROPERTY(bool closing READ closing NOTIFY stateChanged)
     Q_PROPERTY(bool hasFrame READ hasFrame NOTIFY stateChanged)
+    Q_PROPERTY(qint64 frameCapturedMs READ frameCapturedMs NOTIFY frameMetadataChanged)
+    Q_PROPERTY(int frameRotation READ frameRotation NOTIFY frameMetadataChanged)
+    Q_PROPERTY(bool frameMirrored READ frameMirrored NOTIFY frameMetadataChanged)
     Q_PROPERTY(bool photoSaving READ photoSaving NOTIFY stateChanged)
     Q_PROPERTY(QVariantMap metrics READ metrics NOTIFY metricsChanged)
     Q_PROPERTY(bool recording READ recording NOTIFY recordingChanged)
@@ -29,6 +32,8 @@ public:
     ~CameraService()override;
     QImage currentFrame()const{return lastFrame_;}
     qint64 frameCapturedMs()const{return frameCapturedMs_;}
+    int frameRotation()const{return frameRotation_;}
+    bool frameMirrored()const{return frameMirrored_;}
     bool isOpen()const{return connected_;}
     bool opening()const{return opening_;}bool closing()const{return closing_;}
     bool hasFrame()const{return !lastFrame_.isNull();}bool photoSaving()const{return photoSaving_;}
@@ -58,6 +63,7 @@ public slots:
     Q_INVOKABLE bool captureJpeg(const QString &filePath);
 signals:
     void frameReady(const QImage &frame);
+    void frameMetadataChanged();
     void opened();void closed();void error(const QString &message);
     void settingsChanged();void stateChanged();void metricsChanged();void recordingChanged();void mediaSaved();void statusChanged();
 private:
@@ -75,6 +81,8 @@ private:
     bool nativePreview_=false;
     quint64 sequence_=0;
     qint64 frameCapturedMs_=0;
+    int frameRotation_=0;
+    bool frameMirrored_=false;
     QString saveDirectory_,lastPhoto_,lastVideo_,status_;
     int width_=1280,height_=720,fps_=30,rotation_=0,recordedSeconds_=0,maxVideoSeconds_=300;
     bool mirrored_=false,connected_=false,opening_=false,closing_=false,photoSaving_=false,recording_=false,finalizing_=false;

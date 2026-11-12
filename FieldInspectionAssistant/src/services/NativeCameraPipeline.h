@@ -13,6 +13,8 @@ struct CameraFrameStore {
     bool notifyPreview=false,previewNotificationPending=false;
     quint64 captured=0,decoded=0,sequence=0,stale=0,invalid=0;
     qint64 previewCapturedMs=0;
+    int previewRotation=0;
+    bool previewMirrored=false;
     double decodeMs=0,actualFps=0;
     QString error;
 };

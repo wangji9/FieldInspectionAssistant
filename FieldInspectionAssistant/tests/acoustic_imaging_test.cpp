@@ -37,6 +37,30 @@ QByteArray source(double azimuth, double elevation, double radiusMm)
     }
     return pcm;
 }
+
+QByteArray twoTones(const AcousticArrayConfig &geometry, double firstAmplitude)
+{
+    constexpr int channels = AcousticImagingEngine::Channels;
+    constexpr int count = AcousticImagingEngine::Window;
+    const auto direction = [](double azimuth, double elevation) {
+        const double az = azimuth * Pi / 180, el = elevation * Pi / 180;
+        return QVector3D(std::sin(az) * std::cos(el), std::sin(el), std::cos(az) * std::cos(el));
+    };
+    const auto first = direction(17, 7), second = direction(-21, -9);
+    QByteArray pcm(count * channels * 2, Qt::Uninitialized);
+    for (int channel = 0; channel < channels; ++channel) {
+        const double angle = -channel * Pi / 3;
+        const QVector3D mic(std::cos(angle), std::sin(angle), 0);
+        const double delay = geometry.radiusMm / (1000 * (331.3 + .606 * geometry.temperature));
+        for (int frame = 0; frame < count; ++frame) {
+            const double t = double(frame) / Rate;
+            const double sample = firstAmplitude * std::sin(2 * Pi * 2513 * (t + delay * QVector3D::dotProduct(mic, first)))
+                + .36 * std::sin(2 * Pi * 3800 * (t + delay * QVector3D::dotProduct(mic, second)));
+            qToLittleEndian<qint16>(qint16(std::lround(sample * 32768)), pcm.data() + 2 * (channels * frame + channel));
+        }
+    }
+    return pcm;
+}
 }
 
 int main(int argc,char **argv)
@@ -103,5 +127,24 @@ int main(int argc,char **argv)
     const auto quiet = engine.analyze(silence, true);
     if (quiet.valid || quiet.plots.isEmpty())
         return 8;
+
+    geometry.yaw = 0;
+    const auto mixed = twoTones(geometry, .13);
+    for (const auto &target : {QPoint(2513, 17), QPoint(3800, -21)}) {
+        geometry.targetHz = target.x();
+        engine.configure(geometry, Rate);
+        const auto result = engine.analyze(mixed);
+        const auto azimuth = result.values.value("azimuth_deg").toDouble();
+        const auto elevation = result.values.value("elevation_deg").toDouble();
+        qInfo() << "Target Hz" << target.x() << "azimuth" << azimuth << "elevation" << elevation;
+        if (!result.valid || result.heatmap.isNull() || result.values.value("target_hz").toInt() != target.x()
+            || std::abs(azimuth - target.y()) > 3 || std::abs(elevation - (target.y() > 0 ? 7 : -9)) > 3)
+            return 9;
+    }
+    geometry.targetHz = 2513;
+    engine.configure(geometry, Rate);
+    const auto otherFrequency = engine.analyze(twoTones(geometry, 0));
+    if (otherFrequency.valid || otherFrequency.values.value("state") != "target_absent")
+        return 10;
     return 0;
 }

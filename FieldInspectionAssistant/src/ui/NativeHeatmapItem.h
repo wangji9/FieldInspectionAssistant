@@ -4,11 +4,13 @@
 #include <QPolygonF>
 #include <QColor>
 #include <QPointer>
+#include <limits>
 class NativeHeatmapItem:public QQuickPaintedItem{
     Q_OBJECT
     Q_PROPERTY(QVariantMap plotData READ plotData WRITE setPlotData NOTIFY plotDataChanged)
     Q_PROPERTY(QObject *analysisSource READ analysisSource WRITE setAnalysisSource NOTIFY sourceChanged)
     Q_PROPERTY(QString analysisField READ analysisField WRITE setAnalysisField NOTIFY sourceChanged)
+    Q_PROPERTY(int seriesIndex READ seriesIndex WRITE setSeriesIndex NOTIFY sourceChanged)
     Q_PROPERTY(QString plotTitle READ plotTitle NOTIFY plotDataChanged)
     Q_PROPERTY(bool matlabStyle READ matlabStyle WRITE setMatlabStyle NOTIFY styleChanged)
     Q_PROPERTY(bool darkStyle READ darkStyle WRITE setDarkStyle NOTIFY styleChanged)
@@ -17,11 +19,14 @@ class NativeHeatmapItem:public QQuickPaintedItem{
     Q_PROPERTY(bool manualY MEMBER manualY_ NOTIFY rangeChanged)
     Q_PROPERTY(double yMinimum MEMBER yMinimum_ NOTIFY rangeChanged)
     Q_PROPERTY(double yMaximum MEMBER yMaximum_ NOTIFY rangeChanged)
+    Q_PROPERTY(double referenceX MEMBER referenceX_ NOTIFY rangeChanged)
 public:
     explicit NativeHeatmapItem(QQuickItem *parent=nullptr);
     QVariantMap plotData()const{return plot_;}void setPlotData(const QVariantMap &plot);
     QObject *analysisSource()const{return source_;}void setAnalysisSource(QObject*);
     QString analysisField()const{return field_;}void setAnalysisField(const QString&);
+    int seriesIndex() const { return seriesIndex_; }
+    void setSeriesIndex(int index);
     QString plotTitle()const{return plot_.value("title",QStringLiteral("等待真实采样")).toString();}
     bool matlabStyle()const{return matlabStyle_;}
     void setMatlabStyle(bool value);
@@ -41,5 +46,7 @@ private:QVariantMap plot_;QImage image_;double rangeStart_=0,rangeEnd_=1,yMinimu
     bool manualY_=false;QRectF graph_;double xmin_=0,xmax_=1,ymin_=0,ymax_=1;
     bool matlabStyle_=false;
     bool darkStyle_=false;
+    int seriesIndex_ = -1;
+    double referenceX_ = std::numeric_limits<double>::quiet_NaN();
     QImage curveLayer_;
 };

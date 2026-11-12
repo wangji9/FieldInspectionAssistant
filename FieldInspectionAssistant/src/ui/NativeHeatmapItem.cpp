@@ -6,6 +6,7 @@
 #include <cmath>
 #include <algorithm>
 #include "../services/SignalAnalysisService.h"
+#include "../services/AcousticImagingService.h"
 namespace{struct RenderCost{QElapsedTimer timer;double &value;RenderCost(double &v):value(v){timer.start();}~RenderCost(){value=timer.nsecsElapsed()/1e6;}};}
 NativeHeatmapItem::NativeHeatmapItem(QQuickItem *parent):QQuickPaintedItem(parent){setAntialiasing(false);setOpaquePainting(true);connect(this,&NativeHeatmapItem::rangeChanged,this,[this]{update();});connect(this,&QQuickItem::visibleChanged,this,&NativeHeatmapItem::refreshSource);}
 void NativeHeatmapItem::setMatlabStyle(bool value){if(matlabStyle_==value)return;matlabStyle_=value;auto data=plot_;setPlotData(data);emit styleChanged();}
@@ -18,9 +19,42 @@ void NativeHeatmapItem::setDarkStyle(bool value)
     setPlotData(data);
     emit styleChanged();
 }
-void NativeHeatmapItem::setAnalysisSource(QObject *source){if(source_==source)return;disconnect(sourceConnection_);source_=source;if(auto *service=qobject_cast<SignalAnalysisService*>(source))sourceConnection_=connect(service,&SignalAnalysisService::snapshotChanged,this,&NativeHeatmapItem::refreshSource);QMetaObject::invokeMethod(this,&NativeHeatmapItem::refreshSource,Qt::QueuedConnection);emit sourceChanged();}
+void NativeHeatmapItem::setAnalysisSource(QObject *source)
+{
+    if (source_ == source)
+        return;
+    disconnect(sourceConnection_);
+    source_ = source;
+    if (auto *signal = qobject_cast<SignalAnalysisService *>(source))
+        sourceConnection_ = connect(signal, &SignalAnalysisService::snapshotChanged, this, &NativeHeatmapItem::refreshSource);
+    else if (auto *acoustic = qobject_cast<AcousticImagingService *>(source))
+        sourceConnection_ = connect(acoustic, &AcousticImagingService::plotsChanged, this, &NativeHeatmapItem::refreshSource);
+    QMetaObject::invokeMethod(this, &NativeHeatmapItem::refreshSource, Qt::QueuedConnection);
+    emit sourceChanged();
+}
 void NativeHeatmapItem::setAnalysisField(const QString&field){if(field_==field)return;field_=field;QMetaObject::invokeMethod(this,&NativeHeatmapItem::refreshSource,Qt::QueuedConnection);emit sourceChanged();}
-void NativeHeatmapItem::refreshSource(){if(!isVisible())return;if(auto *service=qobject_cast<SignalAnalysisService*>(source_.data())){QVariant value=service->snapshot();for(const auto &key:field_.split('.'))value=value.toMap().value(key);setPlotData(value.toMap());}}
+void NativeHeatmapItem::setSeriesIndex(int index)
+{
+    if (index == seriesIndex_)
+        return;
+    seriesIndex_ = index;
+    refreshSource();
+    emit sourceChanged();
+}
+
+void NativeHeatmapItem::refreshSource()
+{
+    if (!isVisible())
+        return;
+    if (auto *signal = qobject_cast<SignalAnalysisService *>(source_.data())) {
+        QVariant value = signal->snapshot();
+        for (const auto &key : field_.split('.'))
+            value = value.toMap().value(key);
+        setPlotData(value.toMap());
+    } else if (auto *acoustic = qobject_cast<AcousticImagingService *>(source_.data())) {
+        setPlotData(acoustic->plotForDisplay(field_, seriesIndex_));
+    }
+}
 void NativeHeatmapItem::setPlotData(const QVariantMap &plot){
     RenderCost cost(decodeMs_);
     plot_=plot;linePoints_.clear();lineColors_.clear();double xmin=INFINITY,xmax=-INFINITY,ymin=INFINITY,ymax=-INFINITY;
@@ -197,7 +231,13 @@ void NativeHeatmapItem::paint(QPainter *p){
                 else if(kind=="scatter")p->drawPoints(poly);else p->drawPolyline(poly);
             }
             if(fastLines)p->drawImage(QPointF(0,0),curveLayer_);
-        }p->restore();
+        }
+        if (std::isfinite(referenceX_) && referenceX_ >= xmin && referenceX_ <= xmax) {
+            p->setPen(QPen(QColor("#ff3030"), 1.5));
+            const double x = X(referenceX_);
+            p->drawLine(QPointF(x, graph_.top()), QPointF(x, graph_.bottom()));
+        }
+        p->restore();
         const auto xLabel=subsecond?QStringLiteral("时间 / ms"):plot_["xLabel"].toString();
         if(matlabStyle_){
             const auto firstTick=subsecond?QString::number(qRound64(xmin*1000)):plot_.value("xKind")=="time"?QDateTime::fromMSecsSinceEpoch(qint64(xmin*1000)).toString("hh:mm:ss"):number(xmin*plot_.value("xDisplayScale",1).toDouble());

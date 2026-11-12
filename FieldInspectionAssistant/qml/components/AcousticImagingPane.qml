@@ -12,10 +12,14 @@ Item {
     readonly property var observation: service.observation
     readonly property var parameters: service.parameters
     readonly property bool hasLocation: observation.state === "localized"
-    readonly property bool cameraFresh: App.camera.hasFrame && observation.aligned === true
+    readonly property bool cameraCalibrated: parameters.calibrated && App.camera.hasFrame
+    readonly property real skewMs: App.camera.hasFrame && observation.audio_midpoint_ms
+        ? App.camera.frameCapturedMs - Number(observation.audio_midpoint_ms) : NaN
+    readonly property bool cameraFresh: Math.abs(skewMs) <= 180
+        && observation.camera_rotation === App.camera.frameRotation
+        && observation.camera_mirrored === App.camera.frameMirrored
     readonly property bool overlayVisible: hasLocation && (cameraFresh || !App.camera.hasFrame)
     readonly property var fields: [
-        {id:"lower_hz",name:"频带下限 (Hz)"}, {id:"upper_hz",name:"频带上限 (Hz)"},
         {id:"gate_dbfs",name:"最低电平 (dBFS)"}, {id:"smoothing",name:"时序平滑"},
         {id:"temperature",name:"空气温度 (°C)"}, {id:"opacity",name:"热图透明度"},
         {id:"radius_mm",name:"阵列半径 (mm)"}, {id:"channel_one_deg",name:"阵列起点角 (°)"},
@@ -88,22 +92,6 @@ Item {
         const values = {}
         values[key] = value
         service.configure(values)
-    }
-
-    function channelPlot(kind) {
-        const frequency = kind === "frequency"
-        const title = frequency ? "频谱图" : "时域信号"
-        const plot = service.plots[kind]
-        if (!plot) {
-            return frequency
-                ? {title: title, xLabel: "频率 (Hz)", yLabel: "幅值 (dBFS)", xRange: [0, 8000], yRange: [-100, 0]}
-                : {title: title, xLabel: "采样时长 (ms)", yLabel: "幅值 (FS)", xRange: [0, 0.128],
-                   xDisplayScale: 1000, yRange: [-1, 1]}
-        }
-        return Object.assign({}, plot, {
-            title: title,
-            series: plotChannel.currentIndex > 0 ? [plot.series[plotChannel.currentIndex - 1]] : plot.series
-        })
     }
 
     onVisibleChanged: {
@@ -411,7 +399,7 @@ Item {
                 }
 
                 FieldGroup {
-                    title: "目标频带控制"
+                    title: "目标频率控制"
                     Layout.fillWidth: true
                     contentItem: GridLayout {
                         columns: 2
@@ -419,65 +407,39 @@ Item {
                         rowSpacing: 6
                         PanelLabel { text: "采样率" }
                         PanelLabel { text: "16 kHz" }
-                        Basic.RangeSlider {
-                            id: bandSlider
-                            objectName: "acousticFrequencyBand"
+                        Basic.Slider {
+                            id: targetSlider
+                            objectName: "acousticTargetSlider"
                             Layout.columnSpan: 2
                             Layout.fillWidth: true
                             Layout.preferredHeight: 24
-                            from: 80
-                            to: 7400
-                            stepSize: 10
-                            snapMode: RangeSlider.SnapAlways
-                            first.value: pane.parameters.lower_hz
-                            second.value: pane.parameters.upper_hz
+                            from: pane.parameters.target_min_hz
+                            to: pane.parameters.target_max_hz
+                            stepSize: 1
+                            snapMode: Slider.SnapAlways
+                            value: pane.parameters.target_hz
                             enabled: pane.canInspect
-                            Accessible.name: "目标频带"
+                            Accessible.name: "目标频率 (Hz)"
                             background: PanelSliderTrack {
-                                x: bandSlider.leftPadding + 6
-                                width: bandSlider.availableWidth - 12
-                                start: Math.min(bandSlider.first.visualPosition, bandSlider.second.visualPosition)
-                                end: Math.max(bandSlider.first.visualPosition, bandSlider.second.visualPosition)
+                                x: targetSlider.leftPadding + 6
+                                width: targetSlider.availableWidth - 12
+                                end: targetSlider.visualPosition
                             }
-                            first.handle: PanelSliderThumb {
-                                x: bandSlider.leftPadding + bandSlider.first.visualPosition * (bandSlider.availableWidth - width)
-                                pressed: bandSlider.first.pressed
+                            handle: PanelSliderThumb {
+                                x: targetSlider.leftPadding + targetSlider.visualPosition * (targetSlider.availableWidth - width)
+                                pressed: targetSlider.pressed
                             }
-                            second.handle: PanelSliderThumb {
-                                x: bandSlider.leftPadding + bandSlider.second.visualPosition * (bandSlider.availableWidth - width)
-                                pressed: bandSlider.second.pressed
-                            }
-
-                            function applyBand() {
-                                const upper = Math.max(200, Math.round(second.value))
-                                const lower = Math.min(5500, Math.round(first.value), upper - 100)
-                                if (pane.parameters.lower_hz !== lower || pane.parameters.upper_hz !== upper)
-                                    pane.service.configure({lower_hz: lower, upper_hz: upper})
-                                // Apply the minimum band width to the displayed handles too.
-                                setValues(pane.parameters.lower_hz, pane.parameters.upper_hz)
-                            }
-                            first.onPressedChanged: { if (!first.pressed) applyBand() }
-                            second.onPressedChanged: { if (!second.pressed) applyBand() }
-                            first.onMoved: { if (!first.pressed) applyBand() }
-                            second.onMoved: { if (!second.pressed) applyBand() }
+                            onPressedChanged: { if (!pressed) pane.updateParameter("target_hz", Math.round(value)) }
+                            onMoved: { if (!pressed) pane.updateParameter("target_hz", Math.round(value)) }
                         }
-                        PanelLabel { text: "频带下限 (Hz)"; Layout.fillWidth: true; Layout.preferredWidth: 114 }
+                        PanelLabel { text: "目标频率 (Hz)"; Layout.fillWidth: true; Layout.preferredWidth: 114 }
                         PanelNumber {
-                            objectName: "acousticLowerFrequency"
-                            from: 80
-                            to: Math.min(5500, pane.parameters.upper_hz - 100)
-                            value: pane.parameters.lower_hz
+                            objectName: "acousticTargetFrequency"
+                            from: pane.parameters.target_min_hz
+                            to: pane.parameters.target_max_hz
+                            value: pane.parameters.target_hz
                             enabled: pane.canInspect
-                            onValueModified: pane.updateParameter("lower_hz", value)
-                        }
-                        PanelLabel { text: "频带上限 (Hz)"; Layout.fillWidth: true; Layout.preferredWidth: 114 }
-                        PanelNumber {
-                            objectName: "acousticUpperFrequency"
-                            from: Math.max(200, pane.parameters.lower_hz + 100)
-                            to: 7400
-                            value: pane.parameters.upper_hz
-                            enabled: pane.canInspect
-                            onValueModified: pane.updateParameter("upper_hz", value)
+                            onValueModified: pane.updateParameter("target_hz", value)
                         }
                     }
                 }
@@ -555,7 +517,9 @@ Item {
                     Layout.minimumHeight: 86
                     Layout.preferredHeight: 96
                     darkStyle: true
-                    plotData: pane.channelPlot("time")
+                    analysisSource: pane.service
+                    analysisField: "time"
+                    seriesIndex: plotChannel.currentIndex - 1
                     Accessible.name: "时域信号"
                 }
 
@@ -566,7 +530,13 @@ Item {
                     Layout.minimumHeight: 86
                     Layout.preferredHeight: 96
                     darkStyle: true
-                    plotData: pane.channelPlot("frequency")
+                    analysisSource: pane.service
+                    analysisField: "frequency"
+                    seriesIndex: plotChannel.currentIndex - 1
+                    referenceX: pane.parameters.target_hz
+                    manualY: true
+                    yMinimum: -115
+                    yMaximum: 0
                     Accessible.name: "频谱图"
                 }
             }
@@ -602,15 +572,15 @@ Item {
                             function onFrameReady(frame) { camera.frame = frame }
                         }
                     }
-                    Image {
+                    CameraPreview {
                         x: viewport.overlayRect.x
                         y: viewport.overlayRect.y
                         width: viewport.overlayRect.width
                         height: viewport.overlayRect.height
-                        source: pane.overlayVisible ? pane.service.heatmap : ""
-                        cache: false
+                        frame: pane.service.heatmap
+                        visible: pane.overlayVisible
+                        frameAspectSize: Qt.size(Math.max(1, Math.round(width)), Math.max(1, Math.round(height)))
                         smooth: true
-                        fillMode: Image.Stretch
                         opacity: Number(pane.parameters.opacity)
                     }
                 }
@@ -637,9 +607,8 @@ Item {
                             id: marker
                             anchors.centerIn: parent
                             color: "white"
-                            text: pane.observation.speaker_name
-                                ? pane.observation.speaker_name + "  " + pane.observation.speaker_score
-                                : pane.measured(pane.observation.azimuth_deg, 1, "°")
+                            text: pane.parameters.target_hz + " Hz" + (pane.observation.speaker_name
+                                ? "  " + pane.observation.speaker_name : "")
                         }
                     }
                 }
@@ -661,6 +630,17 @@ Item {
                         GradientStop { position: 5/6; color: "#0000ff" }
                         GradientStop { position: 1; color: "#000080" }
                     }
+                }
+
+                PanelLabel {
+                    anchors.top: parent.top
+                    anchors.left: parent.left
+                    anchors.margins: 5
+                    visible: App.camera.hasFrame && !pane.cameraCalibrated
+                    text: "机位未标定 · 叠加仅供参考"
+                    color: "white"
+                    padding: 4
+                    background: Rectangle { color: "#c02a2a2a" }
                 }
 
                 PanelLabel {
@@ -746,10 +726,11 @@ Item {
                         Layout.fillWidth: true
                         elide: Text.ElideRight
                         text: pane.hasLocation
-                            ? "方位 / 俯仰  " + pane.measured(pane.observation.azimuth_deg, 1, "°")
-                              + " / " + pane.measured(pane.observation.elevation_deg, 1, "°")
-                              + "    音画差  " + pane.measured(pane.observation.skew_ms, 0, " ms")
-                            : pane.service.running ? "六路电平  " + pane.measured(pane.observation.level_dbfs, 1, " dBFS")
+                            ? (pane.cameraCalibrated ? "镜头" : "阵列") + "方位 / 俯仰  "
+                              + pane.measured(pane.cameraCalibrated ? pane.observation.azimuth_deg : pane.observation.array_azimuth_deg, 1, "°")
+                              + " / " + pane.measured(pane.cameraCalibrated ? pane.observation.elevation_deg : pane.observation.array_elevation_deg, 1, "°")
+                              + "    音画差  " + pane.measured(pane.skewMs, 0, " ms")
+                            : pane.service.running ? "目标频率电平  " + pane.measured(pane.observation.target_dbfs, 1, " dBFS")
                               : pane.parameters.calibrated ? "机位已标定" : "参考机位参数 · 待现场标定"
                     }
                 }
@@ -803,7 +784,7 @@ Item {
                 }
                 Label {
                     Layout.fillWidth: true
-                    text: "在画面左、右各放一个固定声源，核对通道顺序、视场与偏移后保存。"
+                    text: "先固定相机和麦阵的相对位置，再用目标频率的测试音在画面中央、左右和上下复核。移动任一设备后，请取消已标定并重新校准。"
                     color: Colors.textSecondary; wrapMode: Text.Wrap
                 }
                 MicrophoneArrayView {

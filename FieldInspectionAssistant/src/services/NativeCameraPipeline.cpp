@@ -11,6 +11,8 @@
 #include <unistd.h>
 #include <cerrno>
 #include <cstring>
+#include <thread>
+#include <time.h>
 
 namespace {
 struct Mapping {void *data=nullptr;size_t size=0;};
@@ -20,6 +22,24 @@ public:
     ~Device(){if(fd>=0){if(streaming){v4l2_buf_type type=V4L2_BUF_TYPE_VIDEO_CAPTURE;ioctl(fd,VIDIOC_STREAMOFF,&type);}for(auto b:buffers)if(b.data&&b.data!=MAP_FAILED)munmap(b.data,b.size);::close(fd);}}
 };
 QImage transformed(QImage image,int rotation,bool mirrored){if(mirrored)image=image.mirrored(true,false);if(rotation)image=image.transformed(QTransform().rotate(rotation));return image;}
+
+qint64 monotonicMs()
+{
+    timespec now{};
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    return qint64(now.tv_sec) * 1000 + now.tv_nsec / 1000000;
+}
+
+qint64 captureTimestamp(const v4l2_buffer &buffer, qint64 epochOffset)
+{
+    const auto received = QDateTime::currentMSecsSinceEpoch();
+    if ((buffer.flags & V4L2_BUF_FLAG_TIMESTAMP_MASK) == V4L2_BUF_FLAG_TIMESTAMP_MONOTONIC) {
+        const auto captured = epochOffset + qint64(buffer.timestamp.tv_sec) * 1000 + buffer.timestamp.tv_usec / 1000;
+        if (captured > 0 && captured <= received + 5 && received - captured < 5000)
+            return captured;
+    }
+    return received;
+}
 }
 QByteArray cameraJpeg(const std::shared_ptr<CameraFrameStore>&store){if(!store)return {};QMutexLocker lock(&store->mutex);return store->jpeg;}
 bool saveCameraPhoto(const QByteArray&jpeg,const QString&path,const QByteArray&format,int quality,int rotation,bool mirrored){
@@ -53,44 +73,141 @@ void NativeCameraCapture::run(){
     }
     v4l2_buf_type type=V4L2_BUF_TYPE_VIDEO_CAPTURE;if(ioctl(device.fd,VIDIOC_STREAMON,&type)<0){fail("摄像头启动失败");return;}device.streaming=true;
     {QMutexLocker lock(&store_->mutex);store_->opened=true;}
-    QElapsedTimer clock,rateClock;clock.start();rateClock.start();quint64 rateFrames=0;int missing=0;
+    QByteArray pendingJpeg;
+    qint64 pendingTimestamp = 0;
+    bool decoderStopping = false;
+    QWaitCondition pendingReady;
+    // The capture thread never waits for JPEG decoding. The pending slot keeps
+    // only the most recent compressed frame if the decoder is still busy.
+    std::thread decoder([&] {
+        QElapsedTimer rateClock;
+        rateClock.start();
+        quint64 rateFrames = 0;
+        while (true) {
+            QByteArray jpeg;
+            qint64 capturedMs;
+            QSize limit;
+            int rotation;
+            bool mirrored;
+            {
+                QMutexLocker lock(&store_->mutex);
+                while (pendingJpeg.isEmpty() && !decoderStopping)
+                    pendingReady.wait(&store_->mutex);
+                if (decoderStopping)
+                    break;
+                jpeg.swap(pendingJpeg);
+                capturedMs = pendingTimestamp;
+                limit = store_->previewLimit;
+                rotation = store_->rotation;
+                mirrored = store_->mirrored;
+            }
+            QElapsedTimer cost;
+            cost.start();
+            QBuffer input(&jpeg);
+            input.open(QIODevice::ReadOnly);
+            QImageReader reader(&input, "JPG");
+            if (limit.isValid()) {
+                const QSize source = reader.size();
+                if (rotation == 90 || rotation == 270)
+                    limit.transpose();
+                if (source.isValid()) {
+                    const auto target = source.scaled(limit, Qt::KeepAspectRatio);
+                    if (target.width() < source.width())
+                        reader.setScaledSize(target);
+                }
+            }
+            auto image = reader.read();
+            if (image.isNull()) {
+                QMutexLocker lock(&store_->mutex);
+                ++store_->invalid;
+                continue;
+            }
+            image = transformed(std::move(image), rotation, mirrored).convertToFormat(QImage::Format_RGB32);
+            ++rateFrames;
+            bool notify;
+            {
+                QMutexLocker lock(&store_->mutex);
+                if (decoderStopping)
+                    break;
+                store_->preview = std::move(image);
+                store_->previewCapturedMs = capturedMs;
+                store_->previewRotation = rotation;
+                store_->previewMirrored = mirrored;
+                ++store_->decoded;
+                ++store_->sequence;
+                store_->decodeMs = cost.nsecsElapsed() / 1e6;
+                if (rateClock.elapsed() >= 1000) {
+                    store_->actualFps = rateFrames * 1000. / rateClock.elapsed();
+                    rateFrames = 0;
+                    rateClock.restart();
+                }
+                notify = store_->notifyPreview && !store_->previewNotificationPending;
+                if (notify)
+                    store_->previewNotificationPending = true;
+            }
+            if (notify)
+                emit previewAvailable();
+        }
+    });
+    const auto epochOffset = QDateTime::currentMSecsSinceEpoch() - monotonicMs();
+    int missing = 0;
     while(!isInterruptionRequested()){
         pollfd fd{device.fd,POLLIN,0};int ready=poll(&fd,1,100);
         if(ready<0){if(errno==EINTR)continue;fail("等待摄像头画面失败");break;}
         if(!ready){if(++missing>=50){fail("摄像头超过 5 秒未返回画面，请重新打开");break;}continue;}missing=0;
         if(fd.revents&(POLLERR|POLLHUP|POLLNVAL)){fail("摄像头已断开，请重新连接");break;}
-        QByteArray jpeg;int drained=0;qint64 capturedMs=0;
+        v4l2_buffer latest{};
+        int drained = 0, invalid = 0;
+        auto requeue = [&](v4l2_buffer &buffer) {
+            if (ioctl(device.fd, VIDIOC_QBUF, &buffer) == 0)
+                return true;
+            fail("摄像头帧缓冲区回收失败");
+            requestInterruption();
+            return false;
+        };
         for(unsigned i=0;i<request.count;i++){
             v4l2_buffer b{};b.type=type;b.memory=V4L2_MEMORY_MMAP;
             if(ioctl(device.fd,VIDIOC_DQBUF,&b)<0){if(errno==EAGAIN)break;if(errno==EINTR)continue;fail("读取摄像头帧失败");requestInterruption();break;}
             bool valid=b.index<unsigned(device.buffers.size())&&b.bytesused>0&&b.bytesused<=device.buffers[b.index].size&&!(b.flags&V4L2_BUF_FLAG_ERROR);
-            if(valid){capturedMs=QDateTime::currentMSecsSinceEpoch();jpeg=QByteArray(static_cast<const char*>(device.buffers[b.index].data),int(b.bytesused));drained++;}
-            else {QMutexLocker lock(&store_->mutex);store_->invalid++;}
-            if(ioctl(device.fd,VIDIOC_QBUF,&b)<0){fail("摄像头帧缓冲区回收失败");requestInterruption();break;}
+            if (valid) {
+                if (drained && !requeue(latest))
+                    break;
+                latest = b;
+                ++drained;
+            } else {
+                ++invalid;
+                if (!requeue(b))
+                    break;
+            }
         }
-        if(jpeg.isEmpty())continue;
-        QSize limit;int rotation;bool mirrored;
-        {QMutexLocker lock(&store_->mutex);store_->jpeg=jpeg;store_->captured+=drained;store_->stale+=qMax(0,drained-1);limit=store_->previewLimit;rotation=store_->rotation;mirrored=store_->mirrored;}
-        // Decode only the newest buffer. JPEG's scaled decode avoids full-size RGB allocation.
-        QElapsedTimer cost;cost.start();QBuffer input(&jpeg);input.open(QIODevice::ReadOnly);QImageReader reader(&input,"JPG");
-        QSize source=reader.size();if(rotation==90||rotation==270)limit.transpose();
-        if(source.isValid()&&limit.isValid()){auto target=source.scaled(limit,Qt::KeepAspectRatio);if(target.width()<source.width())reader.setScaledSize(target);}
-        auto image=reader.read();if(image.isNull()){QMutexLocker lock(&store_->mutex);store_->invalid++;continue;}
-        image=transformed(image,rotation,mirrored).convertToFormat(QImage::Format_RGB32);rateFrames++;
-        bool notify = false;
-        {
-            QMutexLocker lock(&store_->mutex);
-            store_->preview=image;store_->previewCapturedMs=capturedMs;store_->decoded++;store_->sequence++;store_->decodeMs=cost.nsecsElapsed()/1e6;
-            if(rateClock.elapsed()>=1000){store_->actualFps=rateFrames*1000./rateClock.elapsed();rateFrames=0;rateClock.restart();}
-            // At most one GUI notification in flight, even if rendering falls behind.
-            notify = store_->notifyPreview && !store_->previewNotificationPending;
-            if (notify)
-                store_->previewNotificationPending = true;
+        if (isInterruptionRequested())
+            break;
+        QByteArray jpeg;
+        qint64 timestamp = 0;
+        if (drained) {
+            jpeg = QByteArray(static_cast<const char *>(device.buffers[latest.index].data), int(latest.bytesused));
+            timestamp = captureTimestamp(latest, epochOffset);
+            if (!requeue(latest))
+                break;
         }
-        if (notify)
-            emit previewAvailable();
+        QMutexLocker lock(&store_->mutex);
+        store_->invalid += invalid;
+        if (jpeg.isEmpty())
+            continue;
+        store_->jpeg = jpeg;
+        store_->captured += drained;
+        store_->stale += drained - 1 + !pendingJpeg.isEmpty();
+        pendingJpeg = std::move(jpeg);
+        pendingTimestamp = timestamp;
+        pendingReady.wakeOne();
     }
-    {QMutexLocker lock(&store_->mutex);store_->opened=false;}
+    {
+        QMutexLocker lock(&store_->mutex);
+        store_->opened = false;
+        decoderStopping = true;
+        pendingReady.wakeOne();
+    }
+    decoder.join();
 }
 
 NativeCameraRecorder::NativeCameraRecorder(std::shared_ptr<CameraFrameStore>store,const QString&target,int fps,int seconds,int quality,int rotation,bool mirrored,QObject*p)
