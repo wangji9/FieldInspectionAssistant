@@ -28,12 +28,13 @@ Window {
     readonly property bool thermalPage: App.nav.page === "thermal"
     readonly property bool canStopCapture: thermal.connected || App.speech.recording || App.visionLive.running
         || App.camera.recording || App.analysis.running || App.videoUnderstanding.running || App.faceAccess.running
+        || App.speakerRecognition.capturing
     readonly property var statusValues: [
         "工程：" + (App.projects.project.name || "未打开"),
         "设备：" + (thermal.device || (App.evidence.cameraConnected ? "摄像头" : "—")),
         "连接：" + (thermal.connected || App.evidence.cameraConnected ? "已连接" : "未连接"),
         "采集：" + (thermal.paused ? "暂停" : thermal.connected && thermal.fps > 0 ? "运行中"
-            : thermal.connected ? "等待数据" : App.analysis.running || App.camera.recording || App.speech.recording || App.visionLive.running || App.videoUnderstanding.running ? "运行中" : "停止"),
+            : thermal.connected ? "等待数据" : App.analysis.running || App.camera.recording || App.speech.recording || App.visionLive.running || App.videoUnderstanding.running || App.speakerRecognition.capturing ? "运行中" : "停止"),
         "AI：" + (App.ai.available || App.projectInference.ready ? "在线" : "离线"),
         "数据库：" + (App.dataDir ? "已打开" : "不可用"),
         thermal.connected ? "FPS：" + thermal.fps.toFixed(1)
@@ -183,7 +184,8 @@ Window {
         Qt.callLater(function() { pageThermal.begin(false) })
     }
     function stopCapture() {
-        if (App.faceAccess.running) App.faceAccess.stop()
+        if (App.nav.page === "analysis" && App.speakerRecognition.capturing) App.speakerRecognition.stopLive()
+        else if (App.faceAccess.running) App.faceAccess.stop()
         else if (App.videoUnderstanding.running) App.videoUnderstanding.stop()
         else if (App.visionLive.running) App.visionLive.stop()
         else if (App.nav.page === "camera" && App.camera.recording) App.camera.stopVideo()

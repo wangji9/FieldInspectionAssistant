@@ -8,18 +8,23 @@
 #include <cmath>
 
 namespace {
-constexpr qreal PlotLeft = 101, PlotRight = 14, WaveTop = 15, WaveHeight = 54, LaneTop = 77, LaneHeight = 24, ScoreHeight = 54;
+constexpr qreal PlotLeft = 90, PlotRight = 16, WaveTop = 14, WaveHeight = 76, LaneTop = 100, LaneHeight = 22, ScoreHeight = 64;
 const QColor ink("#263e53"), muted("#586c7c"), grid("#e0e7ed"), axis("#aab9c6");
+const QColor matlabBlue("#0072bd"), matlabOrange("#d95319");
 
 QString rowKey(const QVariantMap &row)
 {
     return row.value("profile_id",row.value("state")).toString();
 }
 
-QString timeTick(qint64 milliseconds)
+QString timeTick(qint64 milliseconds, bool fractional)
 {
-    const auto seconds=qRound64(milliseconds/1000.);
-    return QStringLiteral("%1:%2").arg(seconds/60,2,10,QLatin1Char('0')).arg(seconds%60,2,10,QLatin1Char('0'));
+    const auto units = qRound64(milliseconds / (fractional ? 100. : 1000.));
+    const auto seconds = fractional ? units / 10 : units;
+    auto label = QStringLiteral("%1:%2").arg(seconds/60,2,10,QLatin1Char('0')).arg(seconds%60,2,10,QLatin1Char('0'));
+    if (fractional)
+        label += QStringLiteral(".%1").arg(units % 10);
+    return label;
 }
 
 QFont plotFont()
@@ -98,10 +103,11 @@ int SpeakerTimelineItem::segmentAt(qreal x) const
     if (x<PlotLeft || x>width()-PlotRight)
         return -1;
     const auto t=metrics_.value("offset_ms").toDouble()+
-        (x-PlotLeft)*metrics_.value("audio_ms").toDouble()/std::max(qreal(1),width()-PlotLeft-PlotRight);
+        (x-PlotLeft)*std::max(1000.,metrics_.value("audio_ms").toDouble())/
+        std::max(qreal(1),width()-PlotLeft-PlotRight);
     for (int i=0;i<segments_.size();++i) {
         const auto segment=segments_[i].toMap();
-        if (t>=segment.value("start_ms").toDouble() && t<=segment.value("end_ms").toDouble())
+        if (t>=segment.value("start_ms").toDouble() && t<segment.value("end_ms").toDouble())
             return i;
     }
     return -1;
@@ -110,17 +116,19 @@ int SpeakerTimelineItem::segmentAt(qreal x) const
 void SpeakerTimelineItem::paint(QPainter *p)
 {
     p->fillRect(boundingRect(),Qt::white);
-    if (width()<PlotLeft+PlotRight+20 || samples_.isEmpty())
+    if (width()<PlotLeft+PlotRight+20)
         return;
     p->setFont(plotFont());
     p->setRenderHint(QPainter::Antialiasing);
     const qreal plotWidth=width()-PlotLeft-PlotRight;
     const qreal offset=metrics_.value("offset_ms").toDouble();
-    const qreal span=std::max(1.,metrics_.value("audio_ms").toDouble());
+    const qreal audioMs=metrics_.value("audio_ms").toDouble();
+    const qreal span=std::max(1000., audioMs);
     const qreal waveMid=WaveTop+WaveHeight/2;
     const qreal scoreBottom=chartHeight()-24;
     const qreal scoreTop=scoreBottom-ScoreHeight;
     const auto timeX=[&](double t){return PlotLeft+(t-offset)*plotWidth/span;};
+    const auto scoreY=[&](double score){return scoreBottom-(score+1.)*ScoreHeight/2.;};
     const int ticks=std::clamp(int(plotWidth/84),2,8);
     for (int i=0;i<=ticks;++i) {
         const qreal x=PlotLeft+plotWidth*i/ticks;
@@ -129,13 +137,19 @@ void SpeakerTimelineItem::paint(QPainter *p)
         p->setPen(muted);
         const QRectF rect(i==0?x:i==ticks?x-66:x-33,scoreBottom+1,66,21);
         p->drawText(rect,(i==0?Qt::AlignLeft:i==ticks?Qt::AlignRight:Qt::AlignHCenter)|Qt::AlignVCenter,
-                    timeTick(qRound64(offset+span*i/ticks)));
+                    timeTick(qRound64(offset+span*i/ticks),span<8000));
     }
+    p->setPen(grid);
+    for (const qreal y : {WaveTop, waveMid-WaveHeight/4, waveMid+WaveHeight/4, WaveTop+WaveHeight,
+                           scoreTop, scoreY(0.)})
+        p->drawLine(QPointF(PlotLeft,y),QPointF(width()-PlotRight,y));
     p->setPen(axis);
     p->drawLine(QPointF(PlotLeft,waveMid),QPointF(width()-PlotRight,waveMid));
     p->drawLine(QPointF(PlotLeft,scoreBottom),QPointF(width()-PlotRight,scoreBottom));
+    p->drawLine(QPointF(PlotLeft,WaveTop),QPointF(PlotLeft,WaveTop+WaveHeight));
+    p->drawLine(QPointF(PlotLeft,scoreTop),QPointF(PlotLeft,scoreBottom));
 
-    qreal peak=.05;
+    qreal peak = .05;
     QVector<QPointF> envelope;
     envelope.reserve(samples_.size());
     for (const auto &sample : samples_) {
@@ -147,17 +161,24 @@ void SpeakerTimelineItem::paint(QPainter *p)
     const qreal scale=(WaveHeight/2-3)/peak;
     QPainterPath trace;
     for (int i=0;i<envelope.size();++i) {
-        const qreal x=PlotLeft+plotWidth*(i+.5)/envelope.size();
+        const qreal x=timeX(offset+audioMs*(i+.5)/envelope.size());
         trace.moveTo(x,waveMid-envelope[i].x()*scale);
         trace.lineTo(x,waveMid-envelope[i].y()*scale);
     }
-    p->setPen(QColor("#4c7fa5"));
+    p->setPen(matlabBlue);
     p->drawPath(trace);
     p->setPen(ink);
-    p->drawText(QPointF(8,WaveTop+10),tr("波形 · FS"));
-    p->drawText(QPointF(8,scoreTop+10),tr("余弦分数"));
+    p->drawText(QPointF(8,WaveTop+13),tr("波形 · FS"));
+    p->drawText(QPointF(8,scoreTop+12),tr("余弦相似度"));
     p->setPen(muted);
-    p->drawText(QPointF(8,waveMid+11),QStringLiteral("±%1").arg(peak,0,'f',2));
+    p->drawText(QPointF(8,waveMid+5),QStringLiteral("±%1").arg(peak,0,'f',2));
+    p->drawText(QPointF(8,scoreY(0.)+4),QStringLiteral("0"));
+    p->drawText(QPointF(8,scoreBottom),QStringLiteral("−1"));
+    if (samples_.isEmpty()) {
+        p->drawText(QRectF(PlotLeft,WaveTop,plotWidth,WaveHeight),Qt::AlignCenter,tr("等待音频"));
+    }
+    if (lanes_.isEmpty())
+        p->drawText(QPointF(8,LaneTop+14),tr("发言时段"));
     for (int i=0;i<lanes_.size();++i) {
         const qreal y=LaneTop+i*LaneHeight;
         p->fillRect(QRectF(PlotLeft,y,plotWidth,LaneHeight-2),QColor(i%2?"#f6f8fa":"#edf2f6"));
@@ -173,11 +194,11 @@ void SpeakerTimelineItem::paint(QPainter *p)
                     QColor(41,102,155,25));
     }
     const qreal threshold=metrics_.value("threshold",.77).toDouble();
-    const qreal thresholdY=scoreBottom-threshold*ScoreHeight;
-    p->setPen(QPen(QColor("#9b6836"),1,Qt::DashLine));
+    const qreal thresholdY=scoreY(threshold);
+    p->setPen(QPen(matlabOrange,1,Qt::DashLine));
     p->drawLine(QPointF(PlotLeft,thresholdY),QPointF(width()-PlotRight,thresholdY));
-    p->setPen(QColor("#875c32"));
-    p->drawText(QPointF(8,thresholdY+18),tr("阈值 %1").arg(threshold,0,'f',2));
+    p->setPen(matlabOrange);
+    p->drawText(QPointF(8,scoreTop+24),tr("阈值 %1").arg(threshold,0,'f',2));
     for (int i=0;i<segments_.size();++i) {
         const auto row=segments_[i].toMap();
         const auto it=std::find_if(lanes_.cbegin(),lanes_.cend(),[&](const Lane &lane){return lane.key==rowKey(row);});
@@ -194,9 +215,9 @@ void SpeakerTimelineItem::paint(QPainter *p)
             p->drawRect(block);
         }
         if (row.value("similarity").isValid()) {
-            const qreal dot=scoreBottom-ScoreHeight*std::clamp(row.value("similarity").toDouble(),0.,1.);
-            p->setPen(grid);
-            p->drawLine(QPointF(x+w/2,dot),QPointF(x+w/2,scoreBottom));
+            const qreal dot=scoreY(std::clamp(row.value("similarity").toDouble(),-1.,1.));
+            p->setPen(QPen(it->color,1));
+            p->drawLine(QPointF(x+w/2,dot),QPointF(x+w/2,scoreY(0.)));
             p->setPen(Qt::NoPen);
             p->setBrush(it->color);
             p->drawEllipse(QPointF(x+w/2,dot),i==selectedIndex_?5:3.5,i==selectedIndex_?5:3.5);

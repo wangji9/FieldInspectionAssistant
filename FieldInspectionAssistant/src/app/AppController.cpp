@@ -47,7 +47,7 @@ AppController::AppController(QObject *parent) : QObject(parent) {
     analysis_ = new SignalAnalysisService(db_,session_,QStandardPaths::writableLocation(QStandardPaths::AppDataLocation)+"/measurements",this);
     evaluation_=new AcousticEvaluationService(db_,session_,workspace_,analysis_,this);
     acousticImaging_=new AcousticImagingService(analysis_,camera_,evidence_,speakerRecognition_,session_,this);
-    analysis_->setReportGuard([this]{if(evaluation_&&evaluation_->busy())return true;if(voiceAssistant_&&voiceAssistant_->engaged())return !voiceAssistant_->suspendForActivity();return false;});
+    analysis_->setReportGuard([this]{if((evaluation_&&evaluation_->busy())||speakerRecognition_->microphoneInUse())return true;if(voiceAssistant_&&voiceAssistant_->engaged())return !voiceAssistant_->suspendForActivity();return false;});
     systemContext_=new SystemContextService(db_,session_,workspace_,analysis_,this);
     knowledge_ = new KnowledgeGraphService(db_,session_,this);
     agent_ = new AgentService(db_,session_,analysis_,knowledge_,workspace_,this);
@@ -55,8 +55,14 @@ AppController::AppController(QObject *parent) : QObject(parent) {
     voiceAssistant_->setSystemContext(systemContext_);agent_->setSystemContext(systemContext_);
     connect(ai_,&AiInferenceService::changed,this,[this]{if(voiceAssistant_&&ai_->busy()&&voiceAssistant_->engaged())voiceAssistant_->suspendForActivity();});
     connect(agent_,&AgentService::changed,this,[this]{if(voiceAssistant_&&agent_->busy()&&voiceAssistant_->engaged())voiceAssistant_->suspendForActivity();});
-    voiceAssistant_->setActivityGuard([this]{return ai_->busy()||agent_->busy()||knowledge_->busy()||evaluation_->busy()||analysis_->running()||workspace_->busy()||speech_->recording()||speech_->speechBusy()||dictation_->active();});
-    speech_->setExternalGuard([this]{if(voiceAssistant_&&voiceAssistant_->engaged())return !voiceAssistant_->suspendForActivity();return false;});
+    voiceAssistant_->setActivityGuard([this]{return ai_->busy()||agent_->busy()||knowledge_->busy()||evaluation_->busy()||analysis_->running()||workspace_->busy()||speech_->recording()||speech_->speechBusy()||dictation_->active()||speakerRecognition_->microphoneInUse();});
+    speech_->setExternalGuard([this]{if(speakerRecognition_->microphoneInUse())return true;if(voiceAssistant_&&voiceAssistant_->engaged())return !voiceAssistant_->suspendForActivity();return false;});
+    speakerRecognition_->setCaptureGuard([this] {
+        if (analysis_->running() || analysis_->recordingBusy() || evaluation_->busy() ||
+            speech_->recording() || speech_->speechBusy() || dictation_->active())
+            return true;
+        return voiceAssistant_->engaged() && !voiceAssistant_->suspendForActivity();
+    });
     connect(session_,&SessionManager::sessionChanged,this,[this]{defects_->setCurrentActor(session_->userId());db_->setActor(session_->userId(),session_->userName());});
     workspace_->setActivityGuard([this]{return (voiceAssistant_&&(voiceAssistant_->engaged()||voiceAssistant_->busy()))||evaluation_->busy()||chartTransfer_->busy()||analysis_->running()||analysis_->exportBusy()||analysis_->recordingBusy()||camera_->recording()||camera_->finalizing()||camera_->photoSaving()||ai_->busy()||agent_->busy()||knowledge_->busy()||speech_->recording()||speakerRecognition_->busy()||dictation_->active();});
     connect(workspace_,&WorkspaceService::maintenanceReady,this,[this](const QString&,const QVariantMap&r){if(r.value("restart_required").toBool())QTimer::singleShot(500,qApp,&QCoreApplication::quit);});

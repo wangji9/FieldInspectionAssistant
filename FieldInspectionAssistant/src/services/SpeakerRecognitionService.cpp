@@ -15,9 +15,11 @@
 #include <QSaveFile>
 #include <QStandardPaths>
 #include <QTemporaryDir>
+#include <QThread>
 #include <QUuid>
 #include <QtConcurrentRun>
 #include <QtEndian>
+#include <alsa/asoundlib.h>
 #include <fvad.h>
 #include <algorithm>
 #include <array>
@@ -33,6 +35,11 @@ constexpr int HandoffSilence = 100;
 constexpr int Window = Rate * 6;
 constexpr int MinVoicedFrames = 45;
 constexpr int MaxSamples = 3;
+constexpr int LiveWindowBytes = 2 * Rate * 24 / 10;
+constexpr int CaptureFrames = Rate * 80 / 1000;
+constexpr int WaveformBins = 640;
+constexpr int LiveRecognitionSeconds = 120;
+constexpr int LiveEnrollmentSeconds = 30;
 constexpr float MinimumMargin = 0.05f;
 const auto ModelName = QStringLiteral("3dspeaker_speech_campplus_sv_zh-cn_16k-common.onnx");
 using Embedding = std::array<float, Dimension>;
@@ -154,7 +161,7 @@ SpeechActivity detectSpeech(const QByteArray &pcm, const std::atomic_bool &cance
 QVariantList waveformEnvelope(const QByteArray &pcm)
 {
     const int samples = int(pcm.size()/2);
-    const int bins = qMin(640, samples);
+    const int bins = qMin(WaveformBins, samples);
     QVariantList result;
     result.reserve(bins);
     for (int i = 0; i < bins; ++i) {
@@ -169,6 +176,48 @@ QVariantList waveformEnvelope(const QByteArray &pcm)
         result.append(QVariant(QVariantList{low/32768.0,high/32768.0}));
     }
     return result;
+}
+
+QString captureMicrophone(int seconds, const std::function<void(QByteArray)> &deliver)
+{
+    const char *device = snd_card_get_index("L6Microphone") >= 0 ? "plughw:CARD=L6Microphone,DEV=0" : "default";
+    snd_pcm_t *handle = nullptr;
+    int result = snd_pcm_open(&handle, device, SND_PCM_STREAM_CAPTURE, SND_PCM_NONBLOCK);
+    if (result < 0)
+        return QObject::tr("无法打开麦克风：%1").arg(QString::fromLocal8Bit(snd_strerror(result)));
+    const std::unique_ptr<snd_pcm_t, decltype(&snd_pcm_close)> pcm(handle, &snd_pcm_close);
+    result = snd_pcm_set_params(pcm.get(), SND_PCM_FORMAT_S16_LE, SND_PCM_ACCESS_RW_INTERLEAVED,
+                                1, Rate, 1, 60000);
+    if (result < 0)
+        return QObject::tr("麦克风无法提供 16 kHz 单声道：%1").arg(QString::fromLocal8Bit(snd_strerror(result)));
+
+    QElapsedTimer lastRead;
+    lastRead.start();
+    std::array<char, CaptureFrames * 2> block{};
+    int frames = 0;
+    int remaining = seconds * Rate;
+    while (remaining > 0 && !QThread::currentThread()->isInterruptionRequested()) {
+        const auto count = snd_pcm_readi(pcm.get(), block.data() + 2 * frames, CaptureFrames - frames);
+        if (count > 0) {
+            lastRead.restart();
+            frames += int(count);
+            if (frames == CaptureFrames) {
+                deliver(QByteArray(block.data(), block.size()));
+                remaining -= CaptureFrames;
+                frames = 0;
+            }
+            continue;
+        }
+        if (count == -EAGAIN || count == 0)
+            result = snd_pcm_wait(pcm.get(), 50);
+        else
+            result = snd_pcm_recover(pcm.get(), int(count), 1);
+        if (result < 0)
+            return QObject::tr("麦克风采集已中断：%1").arg(QString::fromLocal8Bit(snd_strerror(result)));
+        if (lastRead.elapsed() > 3000)
+            return QObject::tr("麦克风 3 秒内未返回音频，请检查连接。");
+    }
+    return {};
 }
 
 QString timeLabel(qint64 ms)
@@ -253,14 +302,31 @@ public:
     QVariantMap run(const QString &path, double start, double length, bool enrollment, double threshold,
                     bool transcribe, const QJsonArray &profiles, const std::atomic_bool &cancelled)
     {
+        QElapsedTimer elapsed;
+        elapsed.start();
+        auto result = runPcm(decode(path, start, length, cancelled), QFileInfo(path).fileName(), start,
+                             enrollment, threshold, transcribe, profiles, cancelled);
+        if (result.contains("metrics")) {
+            auto metrics = result.value("metrics").toMap();
+            metrics["total_ms"] = elapsed.elapsed();
+            result["metrics"] = metrics;
+        } else if (result.contains("embedding")) {
+            result["elapsed_ms"] = elapsed.elapsed();
+        }
+        return result;
+    }
+
+    QVariantMap runPcm(const QByteArray &pcm, const QString &source, double start, bool enrollment,
+                       double threshold, bool transcribe, const QJsonArray &profiles,
+                       const std::atomic_bool &cancelled)
+    {
         const auto loaded = load();
         if (!loaded.value("loaded").toBool())
             return loaded;
         QElapsedTimer elapsed;
         elapsed.start();
-        const auto pcm = decode(path, start, length, cancelled);
         if (pcm.size() < 2*Rate)
-            return error(QObject::tr("所选时段没有可解码音频，或音频不足 1 秒。"));
+            return error(QObject::tr("没有可分析的音频，或音频不足 1 秒。"));
         const auto activity = detectSpeech(pcm, cancelled);
         if (cancelled)
             return {};
@@ -316,7 +382,7 @@ public:
         }
         return {{"segments",rows},{"waveform",waveformEnvelope(pcm)},{"metrics",QVariantMap{{"total_ms",elapsed.elapsed()},{"embedding_ms",embeddingMs},
             {"embeddings",embeddings},{"offset_ms",base},{"audio_ms",qint64(pcm.size())*1000/(2*Rate)},{"threshold",threshold},
-            {"source",QFileInfo(path).fileName()},{"transcription",transcribe}}}};
+            {"source",source},{"transcription",transcribe}}}};
     }
 
     QVariantMap classify(const QByteArray &pcm, double threshold, const QJsonArray &profiles)
@@ -459,6 +525,7 @@ SpeakerRecognitionService::SpeakerRecognitionService(SessionManager *session, QO
 {
     pool_.setMaxThreadCount(1);
     connect(&watcher_, &QFutureWatcher<QVariantMap>::finished, this, &SpeakerRecognitionService::complete);
+    connect(&liveWatcher_, &QFutureWatcher<QVariantMap>::finished, this, &SpeakerRecognitionService::completeLiveWindow);
     connect(&beamWatcher_, &QFutureWatcher<QVariantMap>::finished, this, [this] {
         beamActive_=false;
         if (session_->can("inspect") && session_->userId()==beamOwner_)
@@ -477,12 +544,18 @@ SpeakerRecognitionService::SpeakerRecognitionService(SessionManager *session, QO
         segments_.clear();
         waveform_.clear();
         metrics_.clear();
+        liveMatch_.clear();
+        emit visualsChanged();
         emit changed();
     });
 }
 
 SpeakerRecognitionService::~SpeakerRecognitionService()
 {
+    if (capture_) {
+        capture_->requestInterruption();
+        capture_->wait();
+    }
     if (cancelled_)
         *cancelled_ = true;
     pool_.waitForDone();
@@ -520,6 +593,10 @@ void SpeakerRecognitionService::warmup()
 
 void SpeakerRecognitionService::cancel()
 {
+    if (!liveMode_.isEmpty()) {
+        discardCapture_ = true;
+        stopLive();
+    }
     if (cancelled_) {
         *cancelled_ = true;
         status_ = tr("正在停止");
@@ -550,6 +627,20 @@ bool SpeakerRecognitionService::enroll(const QUrl &source, double start, double 
     const auto path = sourcePath(source);
     if (path.isEmpty() || !validRange(start,length,30))
         return report(tr("请选择可读音频，并选取 1–30 秒的单人发言。"));
+    if (!prepareEnrollment(id, name, language))
+        return false;
+    owner_ = session_->userId();
+    cancelled_ = std::make_shared<std::atomic_bool>(false);
+    status_ = tr("正在提取声纹特征");
+    watcher_.setFuture(QtConcurrent::run(&pool_, [engine=engine_,path,start,length,stop=cancelled_] {
+        return engine->run(path,start,length,true,0,false,{},*stop);
+    }));
+    emit changed();
+    return true;
+}
+
+bool SpeakerRecognitionService::prepareEnrollment(const QString &id, const QString &name, const QString &language)
+{
     const auto index = profileIndex(id);
     if ((!id.isEmpty() && index < 0) || (index < 0 && profiles_.size() >= 250) ||
         (index >= 0 && profiles_[index].toObject().value("samples").toArray().size() >= MaxSamples) ||
@@ -560,13 +651,6 @@ bool SpeakerRecognitionService::enroll(const QUrl &source, double start, double 
     pendingProfile_ = index >= 0 ? id : QUuid::createUuid().toString(QUuid::WithoutBraces);
     pendingName_ = name.trimmed();
     pendingLanguage_ = language;
-    owner_ = session_->userId();
-    cancelled_ = std::make_shared<std::atomic_bool>(false);
-    status_ = tr("正在提取声纹特征");
-    watcher_.setFuture(QtConcurrent::run(&pool_, [engine=engine_,path,start,length,stop=cancelled_] {
-        return engine->run(path,start,length,true,0,false,{},*stop);
-    }));
-    emit changed();
     return true;
 }
 
@@ -582,6 +666,8 @@ bool SpeakerRecognitionService::analyze(const QUrl &source, double start, double
     segments_.clear();
     waveform_.clear();
     metrics_.clear();
+    liveMatch_.clear();
+    emit visualsChanged();
     owner_ = session_->userId();
     cancelled_ = std::make_shared<std::atomic_bool>(false);
     status_ = tr("正在分析选定音频");
@@ -591,6 +677,206 @@ bool SpeakerRecognitionService::analyze(const QUrl &source, double start, double
     }));
     emit changed();
     return true;
+}
+
+void SpeakerRecognitionService::setCaptureGuard(std::function<bool()> guard)
+{
+    captureGuard_ = std::move(guard);
+}
+
+bool SpeakerRecognitionService::startLiveRecognition(double threshold)
+{
+    if (busy() || !ready_ || !session_->can("inspect"))
+        return false;
+    if (!storageValid_ || !std::isfinite(threshold) || threshold < .45 || threshold > .99)
+        return report(tr("请检查声纹库和 0.45–0.99 的余弦阈值。"));
+    return startCapture(QStringLiteral("recognition"), threshold);
+}
+
+bool SpeakerRecognitionService::startLiveEnrollment(const QString &id, const QString &name, const QString &language)
+{
+    if (busy() || !ready_ || !session_->can("settings") || !prepareEnrollment(id, name, language))
+        return false;
+    if (startCapture(QStringLiteral("enrollment"), .77))
+        return true;
+    pendingProfile_.clear();
+    return false;
+}
+
+bool SpeakerRecognitionService::startCapture(const QString &mode, double threshold)
+{
+    if (captureGuard_ && captureGuard_())
+        return report(tr("音频设备正在使用，请结束当前采集后再试。"));
+    owner_ = session_->userId();
+    liveMode_ = mode;
+    captureStopping_ = false;
+    discardCapture_ = false;
+    captureError_.clear();
+    liveCursor_ = 0;
+    liveMatch_.clear();
+    segments_.clear();
+    waveform_.clear();
+    liveEnvelope_.clear();
+    livePcm_.clear();
+    inputLevel_ = -90.;
+    metrics_ = {{"source",tr("实时麦克风")},{"live",true},{"operation",mode},{"offset_ms",0},{"audio_ms",0},{"threshold",threshold},
+                {"embeddings",0},{"embedding_ms",0},{"total_ms",0}};
+    const int seconds = mode == "enrollment" ? LiveEnrollmentSeconds : LiveRecognitionSeconds;
+    livePcm_.reserve(seconds * 2 * Rate);
+    liveEnvelope_.reserve(seconds * Rate / (CaptureFrames / 2));
+    status_ = tr("正在打开麦克风");
+    capture_ = QThread::create([this, seconds] {
+        const auto error = captureMicrophone(seconds, [this](QByteArray block) {
+            QMetaObject::invokeMethod(this, [this, block = std::move(block)] { receiveAudio(block); }, Qt::QueuedConnection);
+        });
+        if (!error.isEmpty())
+            QMetaObject::invokeMethod(this, [this, error] { captureError_ = error; }, Qt::QueuedConnection);
+    });
+    capture_->setParent(this);
+    connect(capture_, &QThread::finished, this, &SpeakerRecognitionService::captureFinished);
+    capture_->start();
+    emit visualsChanged();
+    emit changed();
+    return true;
+}
+
+void SpeakerRecognitionService::receiveAudio(const QByteArray &block)
+{
+    if (captureStopping_ || discardCapture_ || owner_ != session_->userId())
+        return;
+    const bool first = livePcm_.isEmpty();
+    livePcm_.append(block);
+    qint64 squares = 0;
+    for (int offset = 0; offset < CaptureFrames; offset += CaptureFrames / 2) {
+        int low = 0, high = 0;
+        for (int i = offset; i < offset + CaptureFrames / 2; ++i) {
+            const int sample = qFromLittleEndian<qint16>(block.constData() + 2 * i);
+            squares += qint64(sample) * sample;
+            low = qMin(low, sample);
+            high = qMax(high, sample);
+        }
+        liveEnvelope_.append(QPoint(low, high));
+    }
+    const auto rms = std::sqrt(double(squares) / CaptureFrames) / 32768.;
+    inputLevel_ = rms > 0. ? qMax(-90., 20. * std::log10(rms)) : -90.;
+    const int count = int(liveEnvelope_.size());
+    const int bins = qMin(WaveformBins, count);
+    QVariantList envelope;
+    envelope.reserve(bins);
+    for (int i = 0; i < bins; ++i) {
+        int low = 0, high = 0;
+        for (int j = i * count / bins; j < (i + 1) * count / bins; ++j) {
+            low = qMin(low, liveEnvelope_[j].x());
+            high = qMax(high, liveEnvelope_[j].y());
+        }
+        envelope.append(QVariant(QVariantList{low / 32768., high / 32768.}));
+    }
+    waveform_ = std::move(envelope);
+    metrics_["audio_ms"] = qint64(livePcm_.size()) * 1000 / (2 * Rate);
+    emit visualsChanged();
+    if (first) {
+        status_ = liveMode_ == "enrollment" ? tr("正在录入，请连续清晰地说 5–10 秒")
+                  : profiles_.isEmpty() ? tr("正在识别，声纹库暂无档案") : tr("正在识别麦克风语音");
+        emit changed();
+    }
+    if (liveMode_ == "recognition")
+        analyzeLiveWindow();
+}
+
+void SpeakerRecognitionService::stopLive()
+{
+    if (!capture_ || captureStopping_)
+        return;
+    captureStopping_ = true;
+    capture_->requestInterruption();
+    report(tr("正在停止麦克风"));
+}
+
+void SpeakerRecognitionService::captureFinished()
+{
+    std::exchange(capture_, nullptr)->deleteLater();
+    captureStopping_ = false;
+    inputLevel_ = -90.;
+    emit visualsChanged();
+    if (liveMode_ == "recognition") {
+        emit changed();
+        analyzeLiveWindow();
+        return;
+    }
+    liveMode_.clear();
+    liveEnvelope_.clear();
+    auto pcm = std::exchange(livePcm_, QByteArray());
+    if (discardCapture_ || !session_->can("settings") || owner_ != session_->userId() || !captureError_.isEmpty()) {
+        pendingProfile_.clear();
+        report(discardCapture_ ? tr("录入已取消") : captureError_);
+        return;
+    }
+    cancelled_ = std::make_shared<std::atomic_bool>(false);
+    status_ = tr("正在提取声纹特征");
+    watcher_.setFuture(QtConcurrent::run(&pool_, [engine=engine_,pcm=std::move(pcm),stop=cancelled_] {
+        return engine->runPcm(pcm, {}, 0, true, 0, false, {}, *stop);
+    }));
+    emit changed();
+}
+
+void SpeakerRecognitionService::analyzeLiveWindow()
+{
+    if (livePending_)
+        return;
+    const int remaining = int(livePcm_.size()) - liveCursor_;
+    if (!discardCapture_ && (remaining >= LiveWindowBytes ||
+                            (!capture_ && remaining >= 2 * VadFrame * MinVoicedFrames))) {
+        const int length = qMin(remaining, LiveWindowBytes);
+        const auto pcm = livePcm_.mid(liveCursor_, length);
+        const qint64 start = qint64(liveCursor_) * 1000 / (2 * Rate);
+        liveCursor_ += length;
+        const qint64 end = qint64(liveCursor_) * 1000 / (2 * Rate);
+        livePending_ = true;
+        liveWatcher_.setFuture(QtConcurrent::run(&pool_, [engine=engine_,pcm,start,end,profiles=profiles_,
+                                                         threshold=metrics_.value("threshold").toDouble()] {
+            QElapsedTimer elapsed;
+            elapsed.start();
+            auto row = engine->classify(pcm, threshold, profiles);
+            row["start_ms"] = start;
+            row["end_ms"] = end;
+            row["range"] = timeLabel(start) + " – " + timeLabel(end);
+            row["inference_ms"] = elapsed.elapsed();
+            return row;
+        }));
+        return;
+    }
+    if (!capture_) {
+        liveMode_.clear();
+        livePcm_.clear();
+        liveEnvelope_.clear();
+        if (discardCapture_)
+            report(tr("识别已停止"));
+        else if (!captureError_.isEmpty())
+            report(captureError_);
+        else if (metrics_.value("embeddings").toInt() == 0)
+            report(tr("采集结束，未检测到足够的有效语音"));
+        else
+            report(tr("采集结束，已分析 %1 个有效语音窗口").arg(metrics_.value("embeddings").toInt()));
+    }
+}
+
+void SpeakerRecognitionService::completeLiveWindow()
+{
+    livePending_ = false;
+    if (!discardCapture_ && owner_ == session_->userId() && session_->can("inspect")) {
+        const auto row = liveWatcher_.result();
+        segments_.append(row);
+        liveMatch_ = row;
+        const auto elapsed = row.value("inference_ms").toLongLong();
+        metrics_["total_ms"] = metrics_.value("total_ms").toLongLong() + elapsed;
+        if (row.value("state") != "insufficient") {
+            metrics_["embeddings"] = metrics_.value("embeddings").toInt() + 1;
+            metrics_["embedding_ms"] = metrics_.value("embedding_ms").toLongLong() + elapsed;
+        }
+        emit visualsChanged();
+        emit changed();
+    }
+    analyzeLiveWindow();
 }
 
 void SpeakerRecognitionService::complete()
@@ -630,6 +916,7 @@ void SpeakerRecognitionService::complete()
         segments_ = result.value("segments").toList();
         waveform_ = result.value("waveform").toList();
         metrics_ = result.value("metrics").toMap();
+        emit visualsChanged();
         status_ = segments_.isEmpty() ? tr("未检测到有效语音")
                                      : tr("完成 %1 个时段的识别").arg(segments_.size());
     }
