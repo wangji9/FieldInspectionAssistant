@@ -20,7 +20,11 @@ Item {
         {id:"radius_mm",name:"阵列半径 (mm)"}, {id:"channel_one_deg",name:"阵列起点角 (°)"},
         {id:"horizontal_fov",name:"水平视场 (°)"}, {id:"vertical_fov",name:"垂直视场 (°)"},
         {id:"yaw",name:"镜头偏航 (°)"}, {id:"pitch",name:"镜头俯仰 (°)"},
-        {id:"roll",name:"镜头滚转 (°)"}, {id:"speaker_threshold",name:"声纹阈值"}
+        {id:"roll",name:"镜头滚转 (°)"}, {id:"speaker_threshold",name:"声纹阈值"},
+        {id:"camera_x_mm",name:"镜头左右偏移 (mm)",mount:true},
+        {id:"camera_y_mm",name:"镜头上下偏移 (mm)",mount:true},
+        {id:"camera_z_mm",name:"镜头前后偏移 (mm)",mount:true},
+        {id:"focus_depth_m",name:"参考工作距离 (m)",mount:true}
     ]
 
     function showSettings() {
@@ -30,12 +34,24 @@ Item {
         clockwise.checked = parameters.clockwise
         identify.checked = parameters.speaker
         calibrated.checked = parameters.calibrated
+        fixedMount.checked = parameters.fixed_mount
         settingsMessage.text = ""
         settings.open()
     }
+    function applyPhotoPreset() {
+        const radiusEntry = parameterFields.itemAt(fields.findIndex(field => field.id === "radius_mm")).entry
+        const radius = Number(radiusEntry.text)
+        const values = {camera_x_mm: 0, camera_z_mm: 0, focus_depth_m: 1,
+                        camera_y_mm: ((radius > 0 ? radius : parameters.radius_mm) * parameters.photo_vertical_offset_ratio).toFixed(1)}
+        for (let i = 0; i < fields.length; ++i)
+            if (fields[i].mount)
+                parameterFields.itemAt(i).entry.text = String(values[fields[i].id])
+        fixedMount.checked = true
+        calibrated.checked = false
+    }
     function applySettings() {
         const values = {channel_order:orderField.text, clockwise:clockwise.checked, speaker:identify.checked,
-                        calibrated:calibrated.checked}
+                        calibrated:calibrated.checked, fixed_mount:fixedMount.checked}
         for (let i=0;i<fields.length;++i) {
             const text = parameterFields.itemAt(i).entry.text.trim()
             if (!text.length || !Number.isFinite(Number(text))) {
@@ -665,6 +681,11 @@ Item {
             clip: true
             ColumnLayout {
                 width: configScroll.availableWidth; spacing: 7
+                RowLayout {
+                    Layout.fillWidth: true
+                    CheckBox { id: fixedMount; objectName: "acousticFixedMount"; text: "固定环形机位" }
+                    TouchButton { text: "采用照片初值"; autoWidth: true; height: 30; onClicked: pane.applyPhotoPreset() }
+                }
                 GridLayout {
                     Layout.fillWidth: true
                     columns: width > 525 ? 2 : 1
@@ -676,7 +697,7 @@ Item {
                             required property var modelData
                             property alias entry: parameterValue
                             Layout.fillWidth: true
-                            visible: !modelData.srp || pane.parameters.algorithm === 2
+                            visible: (!modelData.srp || pane.parameters.algorithm === 2) && (!modelData.mount || fixedMount.checked)
                             Label { text: modelData.name; Layout.preferredWidth: 130 }
                             TextField {
                                 id: parameterValue
@@ -700,7 +721,9 @@ Item {
                 }
                 Label {
                     Layout.fillWidth: true
-                    text: "先固定相机和麦阵的相对位置，再用目标频率的测试音在画面中央、左右和上下复核。移动任一设备后，请取消已标定并重新校准。"
+                    text: fixedMount.checked
+                        ? "偏移以麦阵中心为原点，朝拍摄方向看右、上、前为正。参考距离沿镜头光轴量取。用同频测试音在中央、左右和上下复核通道及视场。"
+                        : "用目标频率的测试音在画面中央、左右和上下复核。移动相机或麦阵后，请取消已标定并重新校准。"
                     color: Colors.textSecondary; wrapMode: Text.Wrap
                 }
                 MicrophoneArrayView {

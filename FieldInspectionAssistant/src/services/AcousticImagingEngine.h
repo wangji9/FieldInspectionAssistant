@@ -14,6 +14,9 @@ struct AcousticArrayConfig {
     std::array<int,6> channelOrder{0,1,2,3,4,5};
     double horizontalFov = 70.0, verticalFov = 44.0;
     double yaw = 0.0, pitch = 0.0, roll = 0.0;
+    bool fixedMount = false;
+    QVector3D cameraOriginMm;
+    double focusDepthM = 1.0;
     double temperature = 20.0;
     int lowerHz = 450, upperHz = 3800;
     int targetHz = 0;
@@ -28,6 +31,7 @@ struct AcousticImageFrame {
     bool valid = false;
     QImage heatmap;
     QVector3D arrayDirection;
+    QVector3D arraySourceM;
     QVariantMap values;
     QVariantMap plots;
 };
@@ -45,7 +49,8 @@ public:
     void configure(const AcousticArrayConfig &configuration, int sampleRate);
     void setDynamicRange(double rangeDb);
     AcousticImageFrame analyze(const QByteArray &interleaved, bool includePlots = false, bool includeHeatmap = true);
-    QByteArray beamform(const QByteArray &interleaved, const QVector3D &direction) const;
+    QByteArray beamform(const QByteArray &interleaved, const QVector3D &direction,
+                       const QVector3D &sourceM = {}) const;
 
 private:
     struct State;

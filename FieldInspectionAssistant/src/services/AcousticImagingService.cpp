@@ -20,6 +20,7 @@ constexpr qint64 AudioExpiryMs = 800;
 constexpr qint64 LocalizationGapMs = 340;
 constexpr double VoiceWindow = 3.3;
 constexpr double VoiceInterval = 1.8;
+constexpr double PhotoVerticalOffsetRatio = -.13;
 const auto SourceId = QStringLiteral("ListenGo_raw_six");
 const auto SettingsKey = QStringLiteral("acousticImaging/parameters");
 
@@ -180,6 +181,12 @@ bool AcousticImagingService::adopt(const QVariantMap &values)
     next.yaw=number("yaw",next.yaw,-180,180);
     next.pitch=number("pitch",next.pitch,-180,180);
     next.roll=number("roll",next.roll,-180,180);
+    next.fixedMount = values.value("fixed_mount", false).toBool();
+    const auto cameraX = number("camera_x_mm", 0, -250, 250);
+    const auto cameraY = number("camera_y_mm", std::round(PhotoVerticalOffsetRatio * next.radiusMm * 10) / 10, -250, 250);
+    const auto cameraZ = number("camera_z_mm", 0, -250, 250);
+    next.cameraOriginMm = QVector3D(cameraX, cameraY, cameraZ);
+    next.focusDepthM = number("focus_depth_m", next.focusDepthM, .15, 20.);
     next.temperature=number("temperature",next.temperature,-25,60);
     next.lowerHz=int(number("lower_hz",next.lowerHz,80,5500));
     next.upperHz=int(number("upper_hz",next.upperHz,200,7400));
@@ -217,6 +224,9 @@ bool AcousticImagingService::adopt(const QVariantMap &values)
     parameters_={{"radius_mm",next.radiusMm},{"channel_one_deg",next.channelOneDegrees},{"clockwise",next.clockwise},
         {"channel_order",orderText.join(',')},{"horizontal_fov",next.horizontalFov},{"vertical_fov",next.verticalFov},
         {"yaw",next.yaw},{"pitch",next.pitch},{"roll",next.roll},{"temperature",next.temperature},
+        {"fixed_mount",next.fixedMount},{"camera_x_mm",cameraX},
+        {"camera_y_mm",cameraY},{"camera_z_mm",cameraZ},
+        {"focus_depth_m",next.focusDepthM},{"photo_vertical_offset_ratio",PhotoVerticalOffsetRatio},
         {"lower_hz",next.lowerHz},{"upper_hz",next.upperHz},{"target_hz",targetHz},
         {"algorithm",algorithm},{"time_domain",next.timeDomain},{"target_frequency_enabled",algorithm == 0 || algorithm == 3},
         {"dynamic_range_db",next.dynamicRangeDb},
@@ -377,7 +387,7 @@ void AcousticImagingService::sample()
             engine->setDynamicRange(config.dynamicRangeDb);
         result.frame=engine->analyze(window.pcm, true);
         if (requestVoice && result.frame.valid && closeDirection(last,result.frame.arrayDirection)) {
-            result.beam=engine->beamform(window.pcm,result.frame.arrayDirection);
+            result.beam=engine->beamform(window.pcm,result.frame.arrayDirection,result.frame.arraySourceM);
             result.voiceEndMs=qint64(window.endFrame)*1000/window.sampleRate;
             result.voiceStartMs=result.voiceEndMs-qint64(window.pcm.size()/12)*1000/window.sampleRate;
         }

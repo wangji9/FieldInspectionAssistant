@@ -39,6 +39,24 @@ QVector3D rotateToArray(const QVector3D &v, const AcousticArrayConfig &c)
     return QVector3D(cy*x+sy*pz, py, -sy*x+cy*pz).normalized();
 }
 
+QVector3D sourceAtDepth(const QVector3D &cameraRay, const QVector3D &arrayRay, const AcousticArrayConfig &config)
+{
+    if (!config.fixedMount)
+        return {};
+    // Depth is measured along the camera optical axis. The scan plane is perpendicular to it.
+    return config.cameraOriginMm * .001f + arrayRay * (config.focusDepthM / cameraRay.z());
+}
+
+float arrivalAdvance(const QVector3D &mic, const QVector3D &direction,
+                     const QVector3D &sourceM, float sourceRange, float samplesPerMeter)
+{
+    if (sourceRange <= 0)
+        return QVector3D::dotProduct(mic, direction) * samplesPerMeter;
+    // |source| - |source-mic|, evaluated without subtracting two nearly equal distances.
+    const float numerator = 2 * QVector3D::dotProduct(sourceM, mic) - mic.lengthSquared();
+    return numerator / (sourceRange + (sourceM - mic).length()) * samplesPerMeter;
+}
+
 QRgb palette(float value, float strength = 1.f)
 {
     constexpr std::array<std::array<int,3>,7> rgb{{
@@ -202,17 +220,21 @@ void AcousticImagingEngine::configure(const AcousticArrayConfig &configuration,i
             const int cell=y*Width+x;
             const auto camera=QVector3D((2.f*x/(Width-1)-1)*tx,(1-2.f*y/(Height-1))*ty,1).normalized();
             const auto direction=rotateToArray(camera,configuration);
+            const auto source = sourceAtDepth(camera, direction, configuration);
+            const float sourceRange = source.length();
+            std::array<float, MicCount> advance;
+            for (int mic = 0; mic < MicCount; ++mic)
+                advance[mic] = arrivalAdvance(s.positions[mic], direction, source, sourceRange, s.samplesPerMeter);
             s.cameraDirections[cell]=camera;
             if (configuration.timeDomain) {
                 for (int mic = 0; mic < MicCount; ++mic)
-                    s.timeShifts[cell][mic] = -QVector3D::dotProduct(s.positions[mic], direction) * s.samplesPerMeter;
+                    s.timeShifts[cell][mic] = -advance[mic];
                 continue;
             }
             if (!s.steering.empty()) {
                 for (int mic = 0; mic < MicCount; ++mic) {
-                    const float delay = QVector3D::dotProduct(s.positions[mic], direction) * s.samplesPerMeter;
                     for (int bin = s.targetFirstBin; bin <= s.targetLastBin; ++bin) {
-                        const float phase = 2 * Pi * bin * delay / N;
+                        const float phase = 2 * Pi * bin * advance[mic] / N;
                         s.steering[cell][bin - s.targetFirstBin][mic] = {std::cos(phase), std::sin(phase)};
                     }
                 }
@@ -220,8 +242,7 @@ void AcousticImagingEngine::configure(const AcousticArrayConfig &configuration,i
             }
             for (int p=0;p<PairCount;++p) {
                 const auto [i,j]=s.pairs[p];
-                const auto delay = QVector3D::dotProduct(s.positions[j]-s.positions[i],direction)
-                    * s.samplesPerMeter * Interpolation;
+                const auto delay = (advance[j] - advance[i]) * Interpolation;
                 const int lo = int(std::floor(delay));
                 s.delays[cell][p] = {(CorrelationSize + lo) % CorrelationSize,
                     (CorrelationSize + lo + 1) % CorrelationSize, delay - lo};
@@ -494,7 +515,9 @@ AcousticImageFrame AcousticImagingEngine::analyze(const QByteArray &pcm, bool in
     output.values["x"] = x;
     output.values["y"] = y;
     output.values["state"]="localized";
-    output.arrayDirection=rotateToArray(camera, s.config);
+    const auto arrayRay = rotateToArray(camera, s.config);
+    output.arraySourceM = sourceAtDepth(camera, arrayRay, s.config);
+    output.arrayDirection = output.arraySourceM.isNull() ? arrayRay : output.arraySourceM.normalized();
     const auto &array = output.arrayDirection;
     output.values["array_azimuth_deg"] = std::atan2(array.x(), array.z()) / Degree;
     output.values["array_elevation_deg"] = std::atan2(array.y(), std::hypot(array.x(), array.z())) / Degree;
@@ -502,14 +525,15 @@ AcousticImageFrame AcousticImagingEngine::analyze(const QByteArray &pcm, bool in
     return output;
 }
 
-QByteArray AcousticImagingEngine::beamform(const QByteArray &pcm,const QVector3D &direction) const
+QByteArray AcousticImagingEngine::beamform(const QByteArray &pcm, const QVector3D &direction, const QVector3D &sourceM) const
 {
     const auto &s=*state_;
     const int frames=int(pcm.size()/(2*MicCount));
     std::array<float,MicCount> delay;
     int margin=1;
+    const float sourceRange = sourceM.length();
     for (int mic=0;mic<MicCount;++mic) {
-        delay[mic]=-QVector3D::dotProduct(s.positions[mic],direction)*s.samplesPerMeter;
+        delay[mic] = -arrivalAdvance(s.positions[mic], direction, sourceM, sourceRange, s.samplesPerMeter);
         margin=std::max(margin,int(std::ceil(std::abs(delay[mic])))+1);
     }
     if (frames<=2*margin)

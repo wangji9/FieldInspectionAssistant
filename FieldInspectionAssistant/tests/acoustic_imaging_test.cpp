@@ -12,7 +12,7 @@ namespace {
 constexpr int Rate=16000;
 constexpr double Pi=3.14159265358979323846;
 
-QByteArray source(double azimuth, double elevation, double radiusMm)
+QByteArray source(double azimuth, double elevation, double radiusMm, const QVector3D &pointM = {}, int toneHz = 0)
 {
     constexpr int frames=AcousticImagingEngine::Window;
     std::mt19937 rng(17);
@@ -29,10 +29,13 @@ QByteArray source(double azimuth, double elevation, double radiusMm)
     for (int frame=0;frame<frames;++frame) {
         for (int channel=0;channel<6;++channel) {
             const double angle=-channel*Pi/3;
-            const double delta=(x*std::cos(angle)+y*std::sin(angle))*radiusMm*Rate/(1000*(331.3+.606*20));
+            const auto mic = QVector3D(std::cos(angle), std::sin(angle), 0) * (radiusMm / 1000.);
+            const auto pathAdvance = pointM.isNull() ? x * mic.x() + y * mic.y() : pointM.length() - (pointM - mic).length();
+            const double delta = pathAdvance * Rate / (331.3 + .606 * 20);
             const double t=frame+24+delta;
             const int index=int(t);
-            const double value=data[index]+(t-index)*(data[index+1]-data[index]);
+            const double value = toneHz > 0 ? std::sin(2 * Pi * toneHz * t / Rate)
+                : data[index]+(t-index)*(data[index+1]-data[index]);
             qToLittleEndian<qint16>(qint16(value*14000),pcm.data()+2*(6*frame+channel));
         }
     }
@@ -197,5 +200,25 @@ int main(int argc,char **argv)
         return 15;
     if (engine.analyze(silence).heatmap.isNull())
         return 16;
+
+    // A sound at the optical centre is off-axis from the microphone ring.
+    geometry.fixedMount = true;
+    geometry.cameraOriginMm = {70, -30, 15};
+    geometry.focusDepthM = .25;
+    const QVector3D centreSource(.07, -.03, .265);
+    for (int mode = 0; mode < 4; ++mode) {
+        geometry.targetHz = mode == 0 || mode == 3 ? 2500 : 0;
+        geometry.timeDomain = mode == 1;
+        geometry.mvdr = mode == 3;
+        engine.configure(geometry, Rate);
+        const auto pcm = source(0, 0, geometry.radiusMm, centreSource, geometry.targetHz);
+        const auto result = engine.analyze(pcm);
+        const auto u = result.values.value("x").toDouble(), v = result.values.value("y").toDouble();
+        qInfo() << "Fixed mount mode" << mode << "optical centre" << u << v;
+        if (!result.valid || std::abs(u - .5) > .055 || std::abs(v - .5) > .055
+            || (result.arraySourceM - centreSource).length() > .022
+            || engine.beamform(pcm, result.arrayDirection, result.arraySourceM).isEmpty())
+            return 17 + mode;
+    }
     return 0;
 }
