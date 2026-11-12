@@ -17,7 +17,8 @@ class AcousticImagingService final : public QObject
     Q_OBJECT
     Q_PROPERTY(bool running READ running NOTIFY changed)
     Q_PROPERTY(QString status READ status NOTIFY changed)
-    Q_PROPERTY(QImage heatmap READ heatmap NOTIFY changed)
+    Q_PROPERTY(QImage heatmap READ heatmap NOTIFY heatmapChanged)
+    Q_PROPERTY(bool hasHeatmap READ hasHeatmap NOTIFY heatmapChanged)
     Q_PROPERTY(QVariantMap observation READ observation NOTIFY changed)
     Q_PROPERTY(QVariantMap parameters READ parameters NOTIFY parametersChanged)
     Q_PROPERTY(QStringList cameras READ cameras NOTIFY changed)
@@ -32,6 +33,7 @@ public:
     bool running() const { return running_; }
     QString status() const { return status_; }
     QImage heatmap() const { return heatmap_; }
+    bool hasHeatmap() const { return !heatmap_.isNull(); }
     QVariantMap observation() const { return observation_; }
     QVariantMap parameters() const { return parameters_; }
     QStringList cameras() const { return cameras_; }
@@ -52,6 +54,7 @@ signals:
     void changed();
     void parametersChanged();
     void plotsChanged();
+    void heatmapChanged();
 
 private:
     struct Analysis {
@@ -62,11 +65,12 @@ private:
         qint64 receivedMs = 0;
         qint64 voiceStartMs = 0, voiceEndMs = 0;
         int rate = 0;
+        bool heatmapUpdated = false;
     };
 
     void sample();
     void receive();
-    void clearObservation(bool clearPlots = true);
+    void clearObservation(bool clearPlots = true, bool clearHeatmap = true);
     void updateSpeaker();
     bool adopt(const QVariantMap &values);
     bool reject(const QString &text);
@@ -89,6 +93,7 @@ private:
     quint64 revision_ = 1, engineRevision_ = 0, lastFrame_ = 0, stableSince_ = 0, lastVoice_ = 0, beamRequest_ = 0;
     qint64 lastReceived_ = 0, lastLocalized_ = 0, voiceCaptured_ = 0, voiceFrom_ = 0, voiceTo_ = 0;
     qint64 lastPlotMs_ = 0;
+    qint64 lastHeatmapMs_ = 0;
     bool running_ = false, ownsAudio_ = false, ownsCamera_ = false, computing_ = false;
     bool keepPreview_ = false;
 };

@@ -17,6 +17,8 @@ struct AcousticArrayConfig {
     double temperature = 20.0;
     int lowerHz = 450, upperHz = 3800;
     int targetHz = 0;
+    bool timeDomain = false;
+    double dynamicRangeDb = 6.0;
     double gateDbfs = -55.0;
     double smoothing = 0.55;
 };
@@ -33,13 +35,15 @@ class AcousticImagingEngine {
 public:
     static constexpr int Channels = 6;
     static constexpr int Window = 2048;
+    static constexpr int TimeWindow = 512;
     static constexpr int SampleRate = 16000;
     static constexpr int MinimumTargetHz = 80;
     static constexpr int MaximumTargetHz = 7400;
     AcousticImagingEngine();
     ~AcousticImagingEngine();
     void configure(const AcousticArrayConfig &configuration, int sampleRate);
-    AcousticImageFrame analyze(const QByteArray &interleaved, bool includePlots = false);
+    void setDynamicRange(double rangeDb);
+    AcousticImageFrame analyze(const QByteArray &interleaved, bool includePlots = false, bool includeHeatmap = true);
     QByteArray beamform(const QByteArray &interleaved, const QVector3D &direction) const;
 
 private:

@@ -2,6 +2,7 @@
 
 #include <QCoreApplication>
 #include <QDebug>
+#include <QPolygonF>
 #include <QtEndian>
 #include <algorithm>
 #include <cmath>
@@ -114,14 +115,14 @@ int main(int argc,char **argv)
     if (time.size() != channels || frequency.size() != channels)
         return 5;
     for (int channel = 0; channel < channels; ++channel) {
-        const auto points = frequency.at(channel).toMap().value("points").toList();
+        const auto points = frequency.at(channel).toMap().value("native_points").value<QPolygonF>();
         if (points.size() != AcousticImagingEngine::Window / 2 + 1 ||
-            time.at(channel).toMap().value("points").toList().isEmpty())
+            time.at(channel).toMap().value("native_points").value<QPolygonF>().isEmpty())
             return 6;
-        const auto peak = std::max_element(points.cbegin(), points.cend(), [](const QVariant &a, const QVariant &b) {
-            return a.toList().at(1).toDouble() < b.toList().at(1).toDouble();
-        })->toList();
-        if (peak.at(0).toDouble() != 1000 + 125 * channel || std::abs(peak.at(1).toDouble() + 6.02) > .1)
+        const auto peak = *std::max_element(points.cbegin(), points.cend(), [](const QPointF &a, const QPointF &b) {
+            return a.y() < b.y();
+        });
+        if (peak.x() != 1000 + 125 * channel || std::abs(peak.y() + 6.02) > .1)
             return 7;
     }
     const auto quiet = engine.analyze(silence, true);
@@ -144,7 +145,36 @@ int main(int argc,char **argv)
     geometry.targetHz = 2513;
     engine.configure(geometry, Rate);
     const auto otherFrequency = engine.analyze(twoTones(geometry, 0));
-    if (otherFrequency.valid || otherFrequency.values.value("state") != "target_absent")
+    if (otherFrequency.valid || otherFrequency.heatmap.isNull() || otherFrequency.values.value("state") != "target_absent")
         return 10;
+    const auto countHot = [](const QImage &map) {
+        int pixels = 0;
+        for (int y = 0; y < map.height(); ++y)
+            for (int x = 0; x < map.width(); ++x)
+                pixels += qRed(map.pixel(x, y)) > 160;
+        return pixels;
+    };
+    engine.setDynamicRange(1.0);
+    const auto narrow = engine.analyze(mixed);
+    engine.setDynamicRange(15.0);
+    const auto wide = engine.analyze(mixed);
+    if (!narrow.valid || !wide.valid || countHot(narrow.heatmap) >= countHot(wide.heatmap)
+        || narrow.values.value("x") != wide.values.value("x") || narrow.values.value("y") != wide.values.value("y"))
+        return 11;
+    geometry.timeDomain = true;
+    engine.configure(geometry, Rate);
+    for (const auto target : {QPointF(20, 10), QPointF(-22, -8)}) {
+        const auto result = engine.analyze(source(target.x(), target.y(), geometry.radiusMm), true);
+        const auto azimuth = result.values.value("azimuth_deg").toDouble();
+        const auto elevation = result.values.value("elevation_deg").toDouble();
+        qInfo() << "Time-domain" << target << "observed" << azimuth << elevation
+                << "milliseconds" << result.values.value("processing_ms");
+        if (!result.valid || result.heatmap.isNull() || result.plots.contains("frequency") ||
+            std::abs(azimuth - target.x()) > 8 || std::abs(elevation - target.y()) > 8)
+            return 12;
+    }
+    const auto quietMap = engine.analyze(silence);
+    if (quietMap.valid || quietMap.heatmap.isNull() || countHot(quietMap.heatmap))
+        return 13;
     return 0;
 }

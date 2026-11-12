@@ -13,12 +13,6 @@ Item {
     readonly property var parameters: service.parameters
     readonly property bool hasLocation: observation.state === "localized"
     readonly property bool cameraCalibrated: parameters.calibrated && App.camera.hasFrame
-    readonly property real skewMs: App.camera.hasFrame && observation.audio_midpoint_ms
-        ? App.camera.frameCapturedMs - Number(observation.audio_midpoint_ms) : NaN
-    readonly property bool cameraFresh: Math.abs(skewMs) <= 180
-        && observation.camera_rotation === App.camera.frameRotation
-        && observation.camera_mirrored === App.camera.frameMirrored
-    readonly property bool overlayVisible: hasLocation && (cameraFresh || !App.camera.hasFrame)
     readonly property var fields: [
         {id:"gate_dbfs",name:"最低电平 (dBFS)"}, {id:"smoothing",name:"时序平滑"},
         {id:"temperature",name:"空气温度 (°C)"}, {id:"opacity",name:"热图透明度"},
@@ -323,6 +317,12 @@ Item {
                             }
                         }
                         PanelButton {
+                            objectName: "acousticAlgorithmToggle"
+                            text: pane.parameters.time_domain ? "切换到频域算法" : "切换到时域算法"
+                            enabled: pane.canInspect
+                            onClicked: pane.updateParameter("time_domain", !pane.parameters.time_domain)
+                        }
+                        PanelButton {
                             text: "阵列和声学参数"
                             enabled: pane.canInspect
                             onClicked: pane.showSettings()
@@ -387,7 +387,7 @@ Item {
                                 verticalAlignment: Text.AlignVCenter
                                 elide: Text.ElideRight
                                 text: App.analysis.discovering ? "正在查找六麦阵列…" : pane.service.arrayAvailable
-                                    ? "ListenGo 六麦原始输入" : "未检测到六麦阵列"
+                                    ? "ListenGo 六麦原始输入 · 16 kHz" : "未检测到六麦阵列"
                             }
                         }
                         PanelButton {
@@ -399,18 +399,14 @@ Item {
                 }
 
                 FieldGroup {
-                    title: "目标频率控制"
+                    title: pane.parameters.time_domain ? "目标频率控制（时域模式下禁用）" : "目标频率控制"
                     Layout.fillWidth: true
-                    contentItem: GridLayout {
-                        columns: 2
-                        columnSpacing: 10
-                        rowSpacing: 6
-                        PanelLabel { text: "采样率" }
-                        PanelLabel { text: "16 kHz" }
+                    contentItem: RowLayout {
+                        spacing: 6
+                        PanelLabel { text: "频率 (Hz)" }
                         Basic.Slider {
                             id: targetSlider
                             objectName: "acousticTargetSlider"
-                            Layout.columnSpan: 2
                             Layout.fillWidth: true
                             Layout.preferredHeight: 24
                             from: pane.parameters.target_min_hz
@@ -418,7 +414,7 @@ Item {
                             stepSize: 1
                             snapMode: Slider.SnapAlways
                             value: pane.parameters.target_hz
-                            enabled: pane.canInspect
+                            enabled: pane.canInspect && !pane.parameters.time_domain
                             Accessible.name: "目标频率 (Hz)"
                             background: PanelSliderTrack {
                                 x: targetSlider.leftPadding + 6
@@ -432,65 +428,59 @@ Item {
                             onPressedChanged: { if (!pressed) pane.updateParameter("target_hz", Math.round(value)) }
                             onMoved: { if (!pressed) pane.updateParameter("target_hz", Math.round(value)) }
                         }
-                        PanelLabel { text: "目标频率 (Hz)"; Layout.fillWidth: true; Layout.preferredWidth: 114 }
                         PanelNumber {
                             objectName: "acousticTargetFrequency"
+                            Layout.fillWidth: false
                             from: pane.parameters.target_min_hz
                             to: pane.parameters.target_max_hz
                             value: pane.parameters.target_hz
-                            enabled: pane.canInspect
+                            enabled: pane.canInspect && !pane.parameters.time_domain
                             onValueModified: pane.updateParameter("target_hz", value)
                         }
                     }
                 }
 
                 FieldGroup {
-                    title: "成像显示控制"
+                    title: "动态范围控制"
                     Layout.fillWidth: true
-                    contentItem: GridLayout {
-                        columns: 2
-                        columnSpacing: 10
-                        rowSpacing: 6
+                    contentItem: RowLayout {
+                        spacing: 6
+                        PanelLabel { text: "范围 (dB)" }
                         Basic.Slider {
-                            id: gateSlider
-                            objectName: "acousticLevelGate"
-                            Layout.columnSpan: 2
+                            id: rangeSlider
+                            objectName: "acousticDynamicRangeSlider"
                             Layout.fillWidth: true
                             Layout.preferredHeight: 24
-                            from: -100
-                            to: -12
-                            stepSize: 1
+                            from: 0.1
+                            to: 30
+                            stepSize: 0.1
                             snapMode: Slider.SnapAlways
-                            value: pane.parameters.gate_dbfs
+                            value: pane.parameters.dynamic_range_db
                             enabled: pane.canInspect
-                            Accessible.name: "最低电平 (dBFS)"
+                            Accessible.name: "动态范围 (dB)"
                             background: PanelSliderTrack {
-                                x: gateSlider.leftPadding + 6
-                                width: gateSlider.availableWidth - 12
-                                end: gateSlider.visualPosition
+                                x: rangeSlider.leftPadding + 6
+                                width: rangeSlider.availableWidth - 12
+                                end: rangeSlider.visualPosition
                             }
                             handle: PanelSliderThumb {
-                                x: gateSlider.leftPadding + gateSlider.visualPosition * (gateSlider.availableWidth - width)
-                                pressed: gateSlider.pressed
+                                x: rangeSlider.leftPadding + rangeSlider.visualPosition * (rangeSlider.availableWidth - width)
+                                pressed: rangeSlider.pressed
                             }
-                            onPressedChanged: { if (!pressed) pane.updateParameter("gate_dbfs", Math.round(value)) }
-                            onMoved: { if (!pressed) pane.updateParameter("gate_dbfs", Math.round(value)) }
+                            onMoved: { if (!pressed) pane.updateParameter("dynamic_range_db", Math.round(value * 10) / 10) }
+                            onPressedChanged: { if (!pressed) pane.updateParameter("dynamic_range_db", Math.round(value * 10) / 10) }
                         }
-                        PanelLabel { text: "最低电平 (dBFS)"; Layout.fillWidth: true; Layout.preferredWidth: 114 }
                         PanelNumber {
-                            from: -100
-                            to: -12
-                            value: pane.parameters.gate_dbfs
+                            objectName: "acousticDynamicRange"
+                            Layout.fillWidth: false
+                            from: 1
+                            to: 300
+                            value: Math.round(pane.parameters.dynamic_range_db * 10)
                             enabled: pane.canInspect
-                            onValueModified: pane.updateParameter("gate_dbfs", value)
-                        }
-                        PanelLabel { text: "热图透明度 (%)"; Layout.fillWidth: true; Layout.preferredWidth: 114 }
-                        PanelNumber {
-                            from: 8
-                            to: 95
-                            value: Math.round(pane.parameters.opacity * 100)
-                            enabled: pane.canInspect
-                            onValueModified: pane.updateParameter("opacity", value / 100)
+                            validator: DoubleValidator { bottom: 0.1; top: 30; decimals: 1; notation: DoubleValidator.StandardNotation }
+                            textFromValue: (scaled, locale) => (scaled / 10).toLocaleString(locale, "f", 1)
+                            valueFromText: (text, locale) => Math.round(Number.fromLocaleString(locale, text) * 10)
+                            onValueModified: pane.updateParameter("dynamic_range_db", value / 10)
                         }
                     }
                 }
@@ -514,8 +504,8 @@ Item {
                     objectName: "acousticTimeChart"
                     Layout.fillWidth: true
                     Layout.fillHeight: true
-                    Layout.minimumHeight: 86
-                    Layout.preferredHeight: 96
+                    Layout.minimumHeight: 104
+                    Layout.preferredHeight: 112
                     darkStyle: true
                     analysisSource: pane.service
                     analysisField: "time"
@@ -527,13 +517,13 @@ Item {
                     objectName: "acousticFrequencyChart"
                     Layout.fillWidth: true
                     Layout.fillHeight: true
-                    Layout.minimumHeight: 86
-                    Layout.preferredHeight: 96
+                    Layout.minimumHeight: 104
+                    Layout.preferredHeight: 112
                     darkStyle: true
                     analysisSource: pane.service
                     analysisField: "frequency"
                     seriesIndex: plotChannel.currentIndex - 1
-                    referenceX: pane.parameters.target_hz
+                    referenceX: pane.parameters.time_domain ? NaN : pane.parameters.target_hz
                     manualY: true
                     yMinimum: -115
                     yMaximum: 0
@@ -578,88 +568,19 @@ Item {
                         width: viewport.overlayRect.width
                         height: viewport.overlayRect.height
                         frame: pane.service.heatmap
-                        visible: pane.overlayVisible
+                        visible: pane.service.hasHeatmap
                         frameAspectSize: Qt.size(Math.max(1, Math.round(width)), Math.max(1, Math.round(height)))
                         smooth: true
                         opacity: Number(pane.parameters.opacity)
                     }
                 }
 
-                Item {
-                    readonly property real sourceX: viewport.overlayRect.x
-                        + Number(pane.observation.x || 0) * viewport.overlayRect.width
-                    x: viewport.mirrored ? viewport.width - sourceX : sourceX
-                    y: viewport.overlayRect.y + Number(pane.observation.y || 0) * viewport.overlayRect.height
-                    visible: pane.overlayVisible && x >= 0 && x <= viewport.width && y >= 0 && y <= viewport.height
-                    Rectangle {
-                        anchors.centerIn: parent
-                        width: 22; height: 22; radius: 11
-                        color: "transparent"; border.color: "#fbfbf6"; border.width: 1
-                    }
-                    Rectangle { anchors.centerIn: parent; width: 12; height: 1; color: "#fbfbf6" }
-                    Rectangle { anchors.centerIn: parent; width: 1; height: 12; color: "#fbfbf6" }
-                    Rectangle {
-                        x: Math.max(4 - parent.x, Math.min(14, viewport.width - parent.x - width - 19))
-                        y: parent.y > 34 ? -29 : 14
-                        width: marker.implicitWidth + 12; height: 22
-                        color: "#dd212121"
-                        PanelLabel {
-                            id: marker
-                            anchors.centerIn: parent
-                            color: "white"
-                            text: pane.parameters.target_hz + " Hz" + (pane.observation.speaker_name
-                                ? "  " + pane.observation.speaker_name : "")
-                        }
-                    }
-                }
-
-                Rectangle {
-                    anchors.right: parent.right
-                    anchors.top: parent.top
-                    anchors.bottom: parent.bottom
-                    anchors.margins: 5
-                    width: 8
-                    visible: pane.overlayVisible
-                    Accessible.name: "归一化空间响应，从下到上 0 到 1"
-                    gradient: Gradient {
-                        GradientStop { position: 0; color: "#bb0000" }
-                        GradientStop { position: 1/6; color: "#ff6800" }
-                        GradientStop { position: 2/6; color: "#ffff00" }
-                        GradientStop { position: 3/6; color: "#54ff68" }
-                        GradientStop { position: 4/6; color: "#00dbff" }
-                        GradientStop { position: 5/6; color: "#0000ff" }
-                        GradientStop { position: 1; color: "#000080" }
-                    }
-                }
-
-                PanelLabel {
-                    anchors.top: parent.top
-                    anchors.left: parent.left
-                    anchors.margins: 5
-                    visible: App.camera.hasFrame && !pane.cameraCalibrated
-                    text: "机位未标定 · 叠加仅供参考"
-                    color: "white"
-                    padding: 4
-                    background: Rectangle { color: "#c02a2a2a" }
-                }
-
                 PanelLabel {
                     anchors.centerIn: parent
-                    visible: !App.camera.hasFrame && !pane.overlayVisible
+                    visible: !App.camera.hasFrame && !pane.service.hasHeatmap
                     text: App.camera.opening ? "正在打开摄像头…" : pane.cameraInUse
                         ? "等待摄像头画面…" : "请选择并打开摄像头"
                     color: "#727272"
-                }
-
-                PanelLabel {
-                    anchors.bottom: parent.bottom
-                    anchors.left: parent.left
-                    anchors.margins: 5
-                    visible: pane.service.running && !pane.cameraFresh && pane.hasLocation
-                    text: App.camera.hasFrame ? "音画时间差过大" : "角度图 · 摄像头未连接"
-                    color: "#ffffff"
-                    padding: 4
-                    background: Rectangle { color: "#c02a2a2a" }
                 }
             }
 
@@ -729,8 +650,9 @@ Item {
                             ? (pane.cameraCalibrated ? "镜头" : "阵列") + "方位 / 俯仰  "
                               + pane.measured(pane.cameraCalibrated ? pane.observation.azimuth_deg : pane.observation.array_azimuth_deg, 1, "°")
                               + " / " + pane.measured(pane.cameraCalibrated ? pane.observation.elevation_deg : pane.observation.array_elevation_deg, 1, "°")
-                              + "    音画差  " + pane.measured(pane.skewMs, 0, " ms")
-                            : pane.service.running ? "目标频率电平  " + pane.measured(pane.observation.target_dbfs, 1, " dBFS")
+                              + "    音画差  " + pane.measured(pane.observation.skew_ms, 0, " ms")
+                            : pane.service.running ? (pane.parameters.time_domain ? "阵列电平  " + pane.measured(pane.observation.level_dbfs, 1, " dBFS")
+                                : "目标频率电平  " + pane.measured(pane.observation.target_dbfs, 1, " dBFS"))
                               : pane.parameters.calibrated ? "机位已标定" : "参考机位参数 · 待现场标定"
                     }
                 }

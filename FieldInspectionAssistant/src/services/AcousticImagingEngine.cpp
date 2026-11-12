@@ -1,6 +1,7 @@
 #include "AcousticImagingEngine.h"
 
 #include <QElapsedTimer>
+#include <QPolygonF>
 #include <QtEndian>
 #include <opencv2/core.hpp>
 #include <algorithm>
@@ -15,8 +16,9 @@ constexpr int Interpolation = 4;
 constexpr int CorrelationSize = N*Interpolation;
 constexpr int Width = 72;
 constexpr int Height = 44;
-constexpr int TargetHalfBins = 3;
+constexpr int TargetHalfBins = 0;
 constexpr int TargetBins = 2 * TargetHalfBins + 1;
+constexpr int TimeWindow = AcousticImagingEngine::TimeWindow;
 constexpr float Pi = 3.14159265358979323846f;
 constexpr double Degree = Pi/180.0;
 
@@ -35,7 +37,7 @@ QVector3D rotateToArray(const QVector3D &v, const AcousticArrayConfig &c)
     return QVector3D(cy*x+sy*pz, py, -sy*x+cy*pz).normalized();
 }
 
-QRgb palette(float value)
+QRgb palette(float value, float strength = 1.f)
 {
     constexpr std::array<std::array<int,3>,7> rgb{{
         {0,0,128}, {0,0,255}, {0,219,255}, {84,255,104}, {255,255,0}, {255,104,0}, {187,0,0}
@@ -44,8 +46,27 @@ QRgb palette(float value)
     const int first = std::min(int(n),int(rgb.size()-2));
     const float t = n-first;
     const auto c = [&](int index) { return int(rgb[first][index]*(1-t)+rgb[first+1][index]*t); };
-    const int opacity = int(230*std::clamp((value-.22f)/.78f,0.f,1.f));
+    const int opacity = qRound(60 + 182 * value * strength);
     return qRgba(c(0),c(1),c(2),opacity);
+}
+
+QImage powerHeatmap(const std::vector<float> &power, float peak, double rangeDb, float strength = 1.f)
+{
+    QImage image(Width, Height, QImage::Format_ARGB32);
+    if (peak <= 0) {
+        image.fill(palette(0));
+        return image;
+    }
+    // Equivalent to clipping 10*log10(power) at peak dB minus rangeDb.
+    const float floorRatio = std::pow(10., -rangeDb / 10.);
+    for (int y = 0; y < Height; ++y) {
+        auto *line = reinterpret_cast<QRgb *>(image.scanLine(y));
+        for (int x = 0; x < Width; ++x) {
+            const float ratio = std::max(floorRatio, power[y * Width + x] / peak);
+            line[x] = palette(std::clamp(float(1 + 10 * std::log10(ratio) / rangeDb), 0.f, 1.f), strength);
+        }
+    }
+    return image;
 }
 
 qint16 sample(const QByteArray &pcm,int frame,int channel)
@@ -54,38 +75,51 @@ qint16 sample(const QByteArray &pcm,int frame,int channel)
 }
 
 QVariantMap capturePlots(const QByteArray &pcm, int start, int rate,
-                         const std::array<cv::Mat, MicCount> &spectra, double windowSum)
+                         const std::array<cv::Mat, MicCount> &spectra, double windowSum, bool includeSpectrum)
 {
     QVariantList timeSeries, frequencySeries;
+    QPolygonF timeAverage, frequencyAverage;
+    timeAverage.reserve(TimeWindow);
+    frequencyAverage.reserve(N / 2 + 1);
+    std::array<double, N / 2 + 1> sumMagnitude{};
+    std::array<double, TimeWindow> sumSample{};
+    const int waveStart = start + (N - TimeWindow) / 2;
+    const auto toDb = [](double magnitude) { return 20 * std::log10(std::max(1e-6, magnitude)); };
     for (int mic = 0; mic < MicCount; ++mic) {
-        QVariantList time, frequency;
-        // Retain the extrema in each four-sample block in acquisition order.
-        time.reserve(N / 2);
-        for (int frame = 0; frame < N; frame += 4) {
-            std::array<qint16, 4> block;
-            for (int i = 0; i < 4; ++i)
-                block[i] = sample(pcm, start + frame + i, mic);
-            const auto [low, high] = std::minmax_element(block.cbegin(), block.cend());
-            for (const auto point : {std::min(low, high), std::max(low, high)})
-                time.append(QVariant(QVariantList{double(frame + (point - block.cbegin())) / rate, *point / 32768.}));
+        QPolygonF time;
+        time.reserve(TimeWindow);
+        for (int frame = 0; frame < TimeWindow; ++frame) {
+            const int value = sample(pcm, waveStart + frame, mic);
+            time.append(QPointF(frame, value));
+            sumSample[frame] += value;
         }
+        timeSeries.append(QVariantMap{{"native_points", QVariant::fromValue(std::move(time))}});
+        if (!includeSpectrum)
+            continue;
+        QPolygonF frequency;
         frequency.reserve(N / 2 + 1);
         const auto *bins = spectra[mic].ptr<cv::Vec2f>();
         for (int bin = 0; bin <= N / 2; ++bin) {
             const int scale = bin == 0 || bin == N / 2 ? 1 : 2;
             const double magnitude = scale * std::hypot(bins[bin][0], bins[bin][1]) / windowSum;
-            frequency.append(QVariant(QVariantList{double(bin) * rate / N, 20 * std::log10(std::max(1e-6, magnitude))}));
+            frequency.append(QPointF(double(bin) * rate / N, toDb(magnitude)));
+            sumMagnitude[bin] += magnitude;
         }
-        timeSeries.append(QVariantMap{{"points", time}});
-        frequencySeries.append(QVariantMap{{"points", frequency}});
+        frequencySeries.append(QVariantMap{{"native_points", QVariant::fromValue(std::move(frequency))}});
     }
-    return {
-        {"time", QVariantMap{{"series", timeSeries}, {"xRange", QVariantList{0, double(N) / rate}},
-            {"xLabel", QStringLiteral("采样时长 (ms)")}, {"xDisplayScale", 1000.},
-            {"yLabel", QStringLiteral("幅值 (FS)")}}},
-        {"frequency", QVariantMap{{"series", frequencySeries}, {"xRange", QVariantList{0, rate / 2.}},
-            {"xLabel", QStringLiteral("频率 (Hz)")}, {"yLabel", QStringLiteral("幅值 (dBFS)")}, {"method_id", "fft"}}}
-    };
+    for (int frame = 0; frame < TimeWindow; ++frame)
+        timeAverage.append(QPointF(frame, sumSample[frame] / MicCount));
+    QVariantMap plots{{"time", QVariantMap{{"series", timeSeries}, {"average", QVariant::fromValue(std::move(timeAverage))},
+        {"xRange", QVariantList{0, TimeWindow - 1}}, {"xLabel", QStringLiteral("采样点")},
+        {"yLabel", QStringLiteral("幅值")}}}};
+    if (includeSpectrum) {
+        for (int bin = 0; bin <= N / 2; ++bin)
+            frequencyAverage.append(QPointF(double(bin) * rate / N, toDb(sumMagnitude[bin] / MicCount)));
+        plots["frequency"] = QVariantMap{{"series", frequencySeries}, {"average", QVariant::fromValue(std::move(frequencyAverage))},
+            {"xRange", QVariantList{0, rate / 2.}}, {"xLabel", QStringLiteral("频率 (Hz)")},
+            {"yLabel", QStringLiteral("幅值 (dBFS)")}, {"method_id", "fft"}};
+    }
+    return plots;
 }
 }
 
@@ -107,6 +141,10 @@ struct AcousticImagingEngine::State {
     std::vector<float> previous;
     using Steering = std::array<std::array<cv::Vec2f, MicCount>, TargetBins>;
     std::vector<Steering> steering;
+    std::vector<std::array<float, MicCount>> timeShifts;
+    std::array<std::array<float, N>, MicCount> raw;
+    std::vector<float> crossPrefix;
+    int shiftLimit = 0;
     std::vector<float> scores;
 
     State() : cross(CorrelationSize,1,CV_32FC2)
@@ -148,7 +186,10 @@ void AcousticImagingEngine::configure(const AcousticArrayConfig &configuration,i
     s.cameraDirections.resize(Width*Height);
     s.previous.clear();
     s.scores.resize(Width * Height);
-    s.steering.resize(configuration.targetHz > 0 ? Width * Height : 0);
+    s.steering.resize(!configuration.timeDomain && configuration.targetHz > 0 ? Width * Height : 0);
+    s.timeShifts.resize(configuration.timeDomain ? Width * Height : 0);
+    s.shiftLimit = int(std::ceil(r * s.samplesPerMeter)) + 1;
+    s.crossPrefix.resize(configuration.timeDomain ? (4 * s.shiftLimit + 1) * (N + 1) : 0);
     const float tx=std::tan(configuration.horizontalFov*Degree/2), ty=std::tan(configuration.verticalFov*Degree/2);
     for (int y=0;y<Height;++y) {
         for (int x=0;x<Width;++x) {
@@ -157,6 +198,11 @@ void AcousticImagingEngine::configure(const AcousticArrayConfig &configuration,i
             const auto direction=rotateToArray(camera,configuration);
             s.arrayDirections[cell]=direction;
             s.cameraDirections[cell]=camera;
+            if (configuration.timeDomain) {
+                for (int mic = 0; mic < MicCount; ++mic)
+                    s.timeShifts[cell][mic] = -QVector3D::dotProduct(s.positions[mic], direction) * s.samplesPerMeter;
+                continue;
+            }
             if (!s.steering.empty()) {
                 for (int mic = 0; mic < MicCount; ++mic) {
                     const float delay = QVector3D::dotProduct(s.positions[mic], direction) * s.samplesPerMeter;
@@ -176,18 +222,30 @@ void AcousticImagingEngine::configure(const AcousticArrayConfig &configuration,i
     }
 }
 
-AcousticImageFrame AcousticImagingEngine::analyze(const QByteArray &pcm, bool includePlots)
+void AcousticImagingEngine::setDynamicRange(double rangeDb)
+{
+    state_->config.dynamicRangeDb = std::clamp(rangeDb, .1, 60.);
+}
+
+AcousticImageFrame AcousticImagingEngine::analyze(const QByteArray &pcm, bool includePlots, bool includeHeatmap)
 {
     AcousticImageFrame output;
     auto &s=*state_;
     const int frames=int(pcm.size()/(2*MicCount));
     const bool targeted = !s.steering.empty();
-    if (frames < N || s.scores.empty() || (targeted ? s.targetFirstBin > s.targetLastBin : s.firstBin > s.lastBin))
+    const bool timeDomain = s.config.timeDomain;
+    if (frames < N || s.scores.empty() || (targeted && s.targetFirstBin > s.targetLastBin) ||
+        (!targeted && !timeDomain && s.firstBin > s.lastBin))
         return output;
     QElapsedTimer time;
     time.start();
     const int start=frames-N;
-    std::array<double,MicCount> squares{};
+    if (timeDomain && !includeHeatmap) {
+        if (includePlots)
+            output.plots = capturePlots(pcm, start, s.sampleRate, s.spectra, s.windowSum, false);
+        return output;
+    }
+    std::array<double,MicCount> squares{}, sums{};
     std::array<bool,MicCount> distinct{};
     for (int t=0;t<N;++t) {
         const auto first=sample(pcm,start+t,0);
@@ -197,6 +255,10 @@ AcousticImageFrame AcousticImagingEngine::analyze(const QByteArray &pcm, bool in
             squares[mic]+=x*x;
             distinct[mic] |= raw!=first;
             s.input[mic].at<float>(t)=x*s.window[t];
+            if (timeDomain) {
+                s.raw[mic][t] = x;
+                sums[mic] += x;
+            }
         }
     }
     QVariantList levels;
@@ -206,20 +268,61 @@ AcousticImageFrame AcousticImagingEngine::analyze(const QByteArray &pcm, bool in
     output.values={{"level_dbfs",level},{"channels_dbfs",levels}};
     const bool belowGate = level < s.config.gateDbfs;
     const bool duplicate = std::count(distinct.begin(), distinct.end(), true) < 3;
-    if (includePlots || (!belowGate && !duplicate)) {
+    if (!timeDomain && (includePlots || targeted || (!belowGate && !duplicate))) {
         for (int i = 0; i < MicCount; ++i)
             cv::dft(s.input[i], s.spectra[i], cv::DFT_COMPLEX_OUTPUT);
     }
     if (includePlots)
-        output.plots = capturePlots(pcm, start, s.sampleRate, s.spectra, s.windowSum);
-    if (belowGate || duplicate) {
+        output.plots = capturePlots(pcm, start, s.sampleRate, s.spectra, s.windowSum, !timeDomain);
+    if (!includeHeatmap)
+        return output;
+    if (duplicate || (belowGate && !targeted && !timeDomain)) {
         s.previous.clear();
         output.values["state"] = belowGate ? "below_gate" : "duplicate_channels";
+        if (targeted || timeDomain)
+            output.heatmap = powerHeatmap(s.scores, 0, s.config.dynamicRangeDb);
         return output;
     }
 
     auto &scores = s.scores;
-    if (targeted) {
+    bool targetAbsent = false;
+    double strengthDb = level;
+    if (timeDomain) {
+        std::fill(scores.begin(), scores.end(), 0.f);
+        constexpr int first = (N - TimeWindow) / 2;
+        // (sum x)^2 - sum x^2 equals twice the sum of pair products.
+        // Prefix sums let each direction reuse the exact shifted-window pair energy.
+        const int maxLag = 2 * s.shiftLimit;
+        for (const auto &[i, j] : s.pairs) {
+            const float meanI = sums[i] / N, meanJ = sums[j] / N;
+            for (int lag = -maxLag; lag <= maxLag; ++lag) {
+                auto *prefix = s.crossPrefix.data() + (lag + maxLag) * (N + 1);
+                const int begin = first - s.shiftLimit;
+                const int end = first + TimeWindow + s.shiftLimit;
+                prefix[begin] = 0.f;
+                for (int t = begin; t < end; ++t)
+                    prefix[t + 1] = prefix[t] + (s.raw[i][t] - meanI) * (s.raw[j][t + lag] - meanJ);
+            }
+            for (size_t cell = 0; cell < scores.size(); ++cell) {
+                const auto &shift = s.timeShifts[cell];
+                const float delay = shift[j] - shift[i];
+                const int lag = qRound(delay);
+                const float fraction = delay - lag;
+                const int start = first + qRound(shift[i]);
+                const auto integral = [&](int delta) {
+                    const auto *prefix = s.crossPrefix.data() + (lag + delta + maxLag) * (N + 1);
+                    return prefix[start + TimeWindow] - prefix[start];
+                };
+                // Interpolate the lag response rather than attenuating the
+                // waveforms with two independent fractional-sample filters.
+                const float before = integral(-1), at = integral(0), after = integral(1);
+                scores[cell] += at + .5f * fraction * (after - before + fraction * (before + after - 2 * at));
+            }
+        }
+        const float scale = 4.f / s.sampleRate;
+        for (auto &score : scores)
+            score = std::abs(score) * scale;
+    } else if (targeted) {
         std::array<std::array<cv::Vec2f, MicCount>, TargetBins> bins{};
         double targetPower = 0;
         double noisePower = 0;
@@ -245,14 +348,11 @@ AcousticImageFrame AcousticImagingEngine::analyze(const QByteArray &pcm, bool in
             }
         }
         const double bandLevel = 10 * std::log10(std::max(1e-12, 2 * targetPower / (N * s.windowSum * .75 * MicCount)));
+        strengthDb = bandLevel;
         output.values["target_hz"] = s.config.targetHz;
         output.values["target_dbfs"] = bandLevel;
-        if (bandLevel < s.config.gateDbfs || targetPower < 2.5 * TargetBins * noisePower / std::max(1, noiseBins)) {
-            s.previous.clear();
-            output.values["state"] = "target_absent";
-            return output;
-        }
-        const float norm = float(1. / (MicCount * targetPower));
+        targetAbsent = bandLevel < s.config.gateDbfs || targetPower < 2.5 * TargetBins * noisePower / std::max(1, noiseBins);
+        const float norm = targetPower > 0 ? float(1. / (MicCount * targetPower)) : 0.f;
         for (size_t cell = 0; cell < scores.size(); ++cell) {
             float power = 0;
             for (int bin = 0; bin <= s.targetLastBin - s.targetFirstBin; ++bin) {
@@ -308,9 +408,17 @@ AcousticImageFrame AcousticImagingEngine::analyze(const QByteArray &pcm, bool in
     output.values["response"]=*maximum;
     output.values["contrast"]=prominence;
     output.values["processing_ms"]=time.nsecsElapsed()/1e6;
-    if (*maximum < (targeted ? .45f : .08f) || prominence < .035f) {
-        s.previous.clear();
-        output.values["state"]="diffuse";
+    if (targeted || timeDomain) {
+        const auto strength = float(std::clamp((strengthDb - s.config.gateDbfs + 12) / 30, .2, 1.));
+        output.heatmap = powerHeatmap(scores, *maximum, s.config.dynamicRangeDb, strength);
+        s.previous = scores;
+    }
+    const bool diffuse = timeDomain ? *maximum <= 0 || prominence < .035f * *maximum
+                                    : *maximum < (targeted ? .45f : .08f) || prominence < .035f;
+    if (belowGate || targetAbsent || diffuse) {
+        if (!targeted && !timeDomain)
+            s.previous.clear();
+        output.values["state"] = belowGate ? "below_gate" : targetAbsent ? "target_absent" : "diffuse";
         return output;
     }
     if (targeted) {
@@ -323,7 +431,6 @@ AcousticImageFrame AcousticImagingEngine::analyze(const QByteArray &pcm, bool in
                     QVector3D::dotProduct(s.cameraDirections[cell], s.cameraDirections[peak]) < .94f &&
                     value > scores[cell-1] && value > scores[cell+1] &&
                     value > scores[cell-Width] && value > scores[cell+Width]) {
-                    s.previous.clear();
                     output.values["state"] = "ambiguous";
                     return output;
                 }
@@ -341,14 +448,10 @@ AcousticImageFrame AcousticImagingEngine::analyze(const QByteArray &pcm, bool in
     output.values["array_azimuth_deg"] = std::atan2(array.x(), array.z()) / Degree;
     output.values["array_elevation_deg"] = std::atan2(array.y(), std::hypot(array.x(), array.z())) / Degree;
     output.valid=true;
-    output.heatmap=QImage(Width,Height,QImage::Format_ARGB32);
-    const float floor = targeted ? *maximum - .42f * prominence : average;
-    for (int y=0;y<Height;++y) {
-        auto *line=reinterpret_cast<QRgb*>(output.heatmap.scanLine(y));
-        for (int x=0;x<Width;++x)
-            line[x]=palette((scores[y*Width+x]-floor)/(*maximum-floor));
+    if (!targeted && !timeDomain) {
+        output.heatmap = powerHeatmap(scores, *maximum, s.config.dynamicRangeDb);
+        s.previous = scores;
     }
-    s.previous=scores;
     return output;
 }
 

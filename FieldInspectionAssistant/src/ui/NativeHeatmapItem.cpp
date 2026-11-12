@@ -62,7 +62,30 @@ void NativeHeatmapItem::setPlotData(const QVariantMap &plot){
         ? QStringList{"#71e3ff", "#48b4df", "#1f8dff", "#a3f5fa", "#a8b5ff", "#65dbb5"}
         : QStringList{"#8bf92f", "#57d826", "#c7f956", "#49b53e", "#7cec67", "#2c9738"})
         : matlabStyle_?QStringList{"#0072BD","#D95319","#EDB120","#7E2F8E","#77AC30","#4DBEEE","#A2142F"}:QStringList{"#6D63FF","#0BAE91","#FF65AE","#EF9B41","#4895EF","#9154C6","#6B8B38","#DA6373","#525A89"};
-    for(auto entry:plot.value("series").toList()){auto s=entry.toMap();QPolygonF polygon;auto points=s["points"].toList();polygon.reserve(points.size());for(auto v:points){auto p=v.toList();double x=p.value(0).toDouble(),y=p.value(1).toDouble();if(!std::isfinite(x)||!std::isfinite(y))continue;polygon.append(QPointF(x,y));xmin=qMin(xmin,x);xmax=qMax(xmax,x);ymin=qMin(ymin,y);ymax=qMax(ymax,y);}lineColors_.append(QColor(matlabStyle_?palette[linePoints_.size()%palette.size()]:s.value("color",palette[linePoints_.size()%palette.size()]).toString()));linePoints_.append(polygon);}
+    for (const auto &entry : plot.value("series").toList()) {
+        const auto series = entry.toMap();
+        auto polygon = series.value("native_points").value<QPolygonF>();
+        if (!series.contains("native_points")) {
+            const auto points = series.value("points").toList();
+            polygon.reserve(points.size());
+            for (const auto &value : points) {
+                const auto point = value.toList();
+                const double x = point.value(0).toDouble(), y = point.value(1).toDouble();
+                if (std::isfinite(x) && std::isfinite(y))
+                    polygon.append(QPointF(x, y));
+            }
+        }
+        if (!polygon.isEmpty()) {
+            const auto bounds = polygon.boundingRect();
+            xmin = qMin(xmin, bounds.left());
+            xmax = qMax(xmax, bounds.right());
+            ymin = qMin(ymin, bounds.top());
+            ymax = qMax(ymax, bounds.bottom());
+        }
+        const auto color = palette.at(linePoints_.size() % palette.size());
+        lineColors_.append(QColor(matlabStyle_ ? color : series.value("color", color).toString()));
+        linePoints_.append(std::move(polygon));
+    }
     dataBounds_=QRectF(QPointF(xmin,ymin),QPointF(xmax,ymax));auto rows=plot.value("matrix").toList();auto valid=plot.value("validFrames").toList();
     if(rows.isEmpty()){image_=QImage();update();emit plotDataChanged();return;}
     int height=rows.size(),width=rows.first().toList().size();if(!width||height>4096||width>4096){image_=QImage();plot_["matrix"]=QVariantList();plot_["error"]=QStringLiteral("图表数据尺寸无效，请重新计算");update();emit plotDataChanged();return;}
@@ -210,7 +233,7 @@ void NativeHeatmapItem::paint(QPainter *p){
         }
         else{
             QTransform transform(graph_.width()/(xmax-xmin),0,0,-graph_.height()/(ymax-ymin),graph_.left()-xmin*graph_.width()/(xmax-xmin),graph_.bottom()+ymin*graph_.height()/(ymax-ymin));
-            auto *service=qobject_cast<SignalAnalysisService*>(source_.data());bool realtime=service&&service->running()&&kind!="scatter";p->setRenderHint(QPainter::Antialiasing,!realtime);
+            auto *service=qobject_cast<SignalAnalysisService*>(source_.data());bool realtime=((service&&service->running())||qobject_cast<AcousticImagingService*>(source_.data()))&&kind!="scatter";p->setRenderHint(QPainter::Antialiasing,!realtime);
             const bool fastLines=matlabStyle_&&kind=="line";
             if(fastLines){QSize size(qCeil(width()),qCeil(height()));if(curveLayer_.size()!=size)curveLayer_=QImage(size,QImage::Format_ARGB32_Premultiplied);curveLayer_.fill(Qt::transparent);}
             for(int i=0;i<linePoints_.size();i++){
