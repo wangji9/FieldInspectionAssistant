@@ -17,6 +17,8 @@ Item {
     readonly property bool microphone: sourceMode.currentIndex === 0
     readonly property var profile: service.profiles.find(row => row.id === profileId) || ({})
     readonly property bool manager: App.session.permissions.settings
+    readonly property var overlapSpans: service.metrics.overlaps || []
+    readonly property var selected: service.segments[selectedSegment] || ({})
     function useRecording(path, name) {
         sourceMode.currentIndex = 1
         source = "file://" + path
@@ -105,7 +107,19 @@ Item {
                 Label { text: "时长 (s)" }
                 SpinBox { id: duration; from: 1; to: 600; value: 30; editable: true; Layout.preferredWidth: 78 }
             }
-            CheckBox { id: transcribe; height: 30; text: "按档案语种转写"; visible: !pane.microphone; enabled: pane.service.whisperReady && !pane.service.busy }
+            CheckBox {
+                id: transcribe
+                height: 30; text: "发言转写"; checked: true
+                enabled: pane.service.whisperReady && !pane.service.busy
+            }
+            AppComboBox {
+                id: transcriptLanguage
+                width: 98; height: 30
+                model: [{name:"中文",code:"zh"},{name:"自动语种",code:""},{name:"英语",code:"en"}]
+                textRole: "name"; valueRole: "code"
+                enabled: transcribe.enabled && transcribe.checked
+                Accessible.name: "转写语言"
+            }
             TouchButton {
                 objectName: "startLiveSpeakerRecognition"
                 visible: pane.microphone && pane.service.liveMode === ""
@@ -114,7 +128,7 @@ Item {
                 onClicked: {
                     pane.feedback = ""
                     pane.selectedSegment = -1
-                    pane.service.startSmartAnalysis()
+                    pane.service.startSmartAnalysisWithTranscript(transcribe.checked, transcriptLanguage.currentValue)
                 }
             }
             TouchButton {
@@ -133,7 +147,7 @@ Item {
                     pane.feedback = ""
                     pane.selectedSegment = -1
                     pane.service.analyzeSmart(pane.source, pane.rangeStart(), pane.rangeLength(),
-                                              transcribe.enabled && transcribe.checked)
+                                              transcribe.enabled && transcribe.checked, transcriptLanguage.currentValue)
                 }
             }
             TouchButton { text: "加载模型"; height: 30; autoWidth: true; visible: !pane.service.ready && !pane.service.busy; onClicked: pane.service.warmup() }
@@ -157,8 +171,8 @@ Item {
         }
         ScrollView {
             id: panelScroll
-            readonly property bool narrow: width < 770
-            readonly property real panelHeight: Math.max(height - topPadding - bottomPadding, narrow ? 580 : 380)
+            readonly property bool narrow: width < 640
+            readonly property real panelHeight: Math.max(height - topPadding - bottomPadding, narrow ? 680 : 490)
             Layout.fillWidth: true; Layout.fillHeight: true
             Layout.minimumHeight: 0
             contentWidth: availableWidth
@@ -174,9 +188,9 @@ Item {
                     title: "声纹档案"
                     Layout.fillWidth: panels.columns === 1
                     Layout.fillHeight: true
-                    Layout.preferredWidth: 314
-                    Layout.preferredHeight: panels.columns === 1 ? 195 : 0
-                    Layout.maximumHeight: panels.columns === 1 ? 195 : Number.POSITIVE_INFINITY
+                    Layout.preferredWidth: panelScroll.width < 820 ? 155 : 210
+                    Layout.preferredHeight: panels.columns === 1 ? 155 : 0
+                    Layout.maximumHeight: panels.columns === 1 ? 155 : Number.POSITIVE_INFINITY
                     ColumnLayout {
                         anchors.fill: parent
                         spacing: 5
@@ -208,9 +222,8 @@ Item {
                         spacing: 5
                         Rectangle {
                             Layout.fillWidth: true
-                            Layout.preferredHeight: 56
-                            visible: pane.microphone
-                            color: "#f5f7fa"
+                            Layout.preferredHeight: 48
+                            color: "#f0f5fa"
                             border.color: Colors.border
                             RowLayout {
                                 anchors.fill: parent
@@ -220,7 +233,7 @@ Item {
                                     Layout.fillWidth: true
                                     spacing: 1
                                     Label {
-                                        text: "最近发言人"
+                                        text: pane.selectedSegment >= 0 ? "所选发言" : "最近发言"
                                         color: Colors.textSecondary
                                     }
                                     Label {
@@ -230,7 +243,9 @@ Item {
                                         font.bold: true
                                         font.pixelSize: 17
                                         text: {
-                                            const row = pane.service.liveMatch
+                                            const row = pane.selectedSegment >= 0 ? pane.selected :
+                                                pane.service.liveMatch.speaker ? pane.service.liveMatch :
+                                                (pane.service.segments[pane.service.segments.length-1] || ({}))
                                             if (row.speaker)
                                                 return row.speaker
                                             if (row.status)
@@ -243,8 +258,11 @@ Item {
                                     }
                                 }
                                 Label {
-                                    text: "余弦  " + (pane.service.liveMatch.score || "—")
-                                    visible: pane.microphone
+                                    text: {
+                                        const row = pane.selectedSegment >= 0 ? pane.selected : pane.service.liveMatch
+                                        return row.overlap ? "含多人同讲" : row.score && row.score !== "—" ? "余弦  " + row.score : ""
+                                    }
+                                    visible: !!text
                                 }
                                 ColumnLayout {
                                     visible: pane.microphone
@@ -274,9 +292,18 @@ Item {
                                     return pane.service.status
                                 if (!info.audio_ms)
                                     return pane.service.status === "分析完成" ? "" : pane.service.status
-                                return "%1 s  ·  %2 个发言片段  ·  新建 %3 个档案"
-                                    .arg((info.audio_ms/1000).toFixed(1)).arg(info.embeddings || 0)
-                                    .arg(info.new_profiles || 0)
+                                const overlapMs = pane.overlapSpans.reduce((sum,r) => sum + r.end_ms-r.start_ms, 0)
+                                const ranges = pane.service.segments
+                                let covered = 0
+                                let last = Number(info.offset_ms || 0)
+                                for (const r of ranges) {
+                                    covered += Math.max(0,r.end_ms-Math.max(last,r.start_ms))
+                                    last = Math.max(last,r.end_ms)
+                                }
+                                return "%1 个片段  ·  发言 %2 s  ·  间隙 %3 s  ·  同讲 %4 s"
+                                    .arg(ranges.length).arg((covered/1000).toFixed(1))
+                                    .arg((Math.max(0,Number(info.analyzed_ms ?? info.audio_ms)-covered)/1000).toFixed(1))
+                                    .arg((overlapMs/1000).toFixed(1))
                             }
                             visible: !!text
                             color: Colors.textSecondary
@@ -284,11 +311,12 @@ Item {
                         SpeakerTimeline {
                             objectName: "speakerTimeline"
                             Layout.fillWidth: true
-                            Layout.preferredHeight: Math.min(implicitHeight, Math.max(180,pane.height*0.44))
+                            Layout.preferredHeight: Math.min(implicitHeight, 338)
                             samples: pane.service.waveform
                             segments: pane.service.segments
                             profiles: pane.service.profiles
                             metrics: pane.service.metrics
+                            spectrogram: pane.service.spectrogram
                             selectedIndex: pane.selectedSegment
                             onSelected: function(index) { pane.selectedSegment = index }
                         }
@@ -296,6 +324,7 @@ Item {
                             objectName: "speakerSegments"
                             spreadsheet: true
                             Layout.fillWidth: true; Layout.fillHeight: true
+                            Layout.minimumHeight: 92
                             items: pane.service.segments
                             selectedIndex: pane.selectedSegment
                             onRowClicked: function(index, entry) { pane.selectedSegment = index }
@@ -304,18 +333,25 @@ Item {
                                 : "发言片段会显示在这里"
                             columns: [{key:"range",title:"起止时间",width:178},
                                       {key:"speaker",title:"发言人",width:92},{key:"status",title:"状态",width:80},
-                                      {key:"score",title:"余弦",width:55},{key:"language",title:"语种",width:45},
-                                      {key:"transcript",title:"转写",width:0}]
+                                      {key:"score",title:"余弦",width:55},{key:"mode",title:"发言方式",width:82},
+                                      {key:"transcript",title:"发言内容",width:0}]
                         }
                         ScrollView {
                             id: transcriptView
                             readonly property var row: pane.service.segments[pane.selectedSegment] || ({})
-                            visible: !!row.transcript || row.transcript_status === "empty"
-                            Layout.fillWidth: true; Layout.preferredHeight: 75
+                            visible: pane.selectedSegment >= 0 && !!row.range
+                            Layout.fillWidth: true; Layout.preferredHeight: 54
                             contentWidth: availableWidth
                             TextArea {
                                 readOnly: true; selectByMouse: true; wrapMode: TextEdit.Wrap
-                                text: transcriptView.row.transcript || "该时段未返回转写文本。"
+                                text: {
+                                    const row = transcriptView.row
+                                    if (row.transcript_status === "partial")
+                                        return row.transcript + "\n同讲部分未转写"
+                                    if (row.transcript_status === "overlap")
+                                        return "此片段包含多人同讲，暂无可归属的转写。"
+                                    return row.transcript || "此片段暂无转写。"
+                                }
                             }
                         }
                     }

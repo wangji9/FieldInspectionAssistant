@@ -1,5 +1,6 @@
 #pragma once
 
+#include <QImage>
 #include <QQuickPaintedItem>
 #include <QVariant>
 
@@ -10,6 +11,7 @@ class SpeakerTimelineItem : public QQuickPaintedItem
     Q_PROPERTY(QVariantList segments READ segments WRITE setSegments NOTIFY dataChanged)
     Q_PROPERTY(QVariantList profiles READ profiles WRITE setProfiles NOTIFY dataChanged)
     Q_PROPERTY(QVariantMap metrics READ metrics WRITE setMetrics NOTIFY dataChanged)
+    Q_PROPERTY(QImage spectrogram READ spectrogram WRITE setSpectrogram NOTIFY dataChanged)
     Q_PROPERTY(int selectedIndex READ selectedIndex WRITE setSelectedIndex NOTIFY dataChanged)
     Q_PROPERTY(int chartHeight READ chartHeight NOTIFY dataChanged)
 public:
@@ -18,14 +20,16 @@ public:
     QVariantList segments() const { return segments_; }
     QVariantList profiles() const { return profiles_; }
     QVariantMap metrics() const { return metrics_; }
+    QImage spectrogram() const { return spectrogram_; }
     int selectedIndex() const { return selectedIndex_; }
     int chartHeight() const;
     void setSamples(const QVariantList &value);
     void setSegments(const QVariantList &value);
     void setProfiles(const QVariantList &value);
     void setMetrics(const QVariantMap &value);
+    void setSpectrogram(const QImage &value);
     void setSelectedIndex(int value);
-    Q_INVOKABLE int segmentAt(qreal x) const;
+    Q_INVOKABLE int segmentAt(qreal x, qreal y) const;
     void paint(QPainter *painter) override;
 
 signals:
@@ -37,6 +41,7 @@ private:
     void refresh();
     QVariantList samples_, segments_, profiles_;
     QVariantMap metrics_;
+    QImage spectrogram_;
     QList<Lane> lanes_;
     int selectedIndex_ = -1;
 };

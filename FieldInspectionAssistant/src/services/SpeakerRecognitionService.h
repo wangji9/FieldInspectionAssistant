@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QFutureWatcher>
+#include <QImage>
 #include <QJsonArray>
 #include <QPoint>
 #include <QQueue>
@@ -14,6 +15,7 @@
 class SessionManager;
 class SpeakerRecognitionEngine;
 class SmartSpeech;
+class SpeakerSpectrum;
 class QThread;
 
 class SpeakerRecognitionService final : public QObject
@@ -32,6 +34,7 @@ class SpeakerRecognitionService final : public QObject
     Q_PROPERTY(bool capturing READ capturing NOTIFY changed)
     Q_PROPERTY(double inputLevel READ inputLevel NOTIFY visualsChanged)
     Q_PROPERTY(QVariantMap liveMatch READ liveMatch NOTIFY changed)
+    Q_PROPERTY(QImage spectrogram READ spectrogram NOTIFY spectrumChanged)
 
 public:
     explicit SpeakerRecognitionService(SessionManager *session, QObject *parent = nullptr);
@@ -50,6 +53,7 @@ public:
     bool microphoneInUse() const { return capture_ != nullptr; }
     double inputLevel() const { return inputLevel_; }
     QVariantMap liveMatch() const { return liveMatch_; }
+    QImage spectrogram() const { return spectrogram_; }
     void setCaptureGuard(std::function<bool()> guard);
 
     bool canClassifyBeam() const;
@@ -60,7 +64,10 @@ public:
                             const QString &name, const QString &language);
     Q_INVOKABLE bool analyze(const QUrl &source, double start, double length, double threshold, bool transcribe);
     Q_INVOKABLE bool analyzeSmart(const QUrl &source, double start, double length, bool transcribe);
+    Q_INVOKABLE bool analyzeSmart(const QUrl &source, double start, double length, bool transcribe, const QString &language);
     Q_INVOKABLE bool startSmartAnalysis();
+    Q_INVOKABLE bool startSmartAnalysisWithTranscript(bool transcribe);
+    Q_INVOKABLE bool startSmartAnalysisWithTranscript(bool transcribe, const QString &language);
     Q_INVOKABLE bool startLiveRecognition(double threshold);
     Q_INVOKABLE bool startLiveEnrollment(const QString &id, const QString &name, const QString &language);
     Q_INVOKABLE void stopLive();
@@ -71,6 +78,7 @@ public:
 signals:
     void changed();
     void visualsChanged();
+    void spectrumChanged();
     void beamClassified(quint64 request, const QVariantMap &match);
 
 private:
@@ -78,8 +86,9 @@ private:
     bool fail(const QString &message);
     void complete();
     bool prepareEnrollment(const QString &id, const QString &name, const QString &language);
-    bool startCapture(const QString &mode, double threshold);
-    bool analyzeFile(const QUrl &source, double start, double length, double threshold, bool transcribe, bool smart);
+    bool startCapture(const QString &mode, double threshold, bool transcribe = false, const QString &language = {});
+    bool analyzeFile(const QUrl &source, double start, double length, double threshold, bool transcribe, bool smart,
+                     const QString &language = {});
     void scanLiveSpeech(bool flush);
     void receiveAudio(const QByteArray &block);
     void captureFinished();
@@ -106,6 +115,9 @@ private:
     QString smartSaveError_;
     QString operationError_;
     std::unique_ptr<SmartSpeech> smartSpeech_;
+    std::unique_ptr<SpeakerSpectrum> spectrum_;
+    QImage spectrogram_;
+    std::shared_ptr<std::atomic_bool> smartCancel_;
     struct SpeechWindow { int first, last, voiced; };
     QQueue<SpeechWindow> speechWindows_;
     QByteArray livePcm_;
