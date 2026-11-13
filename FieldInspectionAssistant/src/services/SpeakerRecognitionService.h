@@ -65,6 +65,8 @@ public:
     Q_INVOKABLE bool analyze(const QUrl &source, double start, double length, double threshold, bool transcribe);
     Q_INVOKABLE bool analyzeSmart(const QUrl &source, double start, double length, bool transcribe);
     Q_INVOKABLE bool analyzeSmart(const QUrl &source, double start, double length, bool transcribe, const QString &language);
+    Q_INVOKABLE bool analyzeSmartMeeting(const QUrl &source, double start, double length, bool transcribe,
+                                         const QString &language, int expectedSpeakers);
     Q_INVOKABLE bool startSmartAnalysis();
     Q_INVOKABLE bool startSmartAnalysisWithTranscript(bool transcribe);
     Q_INVOKABLE bool startSmartAnalysisWithTranscript(bool transcribe, const QString &language);
@@ -88,7 +90,7 @@ private:
     bool prepareEnrollment(const QString &id, const QString &name, const QString &language);
     bool startCapture(const QString &mode, double threshold, bool transcribe = false, const QString &language = {});
     bool analyzeFile(const QUrl &source, double start, double length, double threshold, bool transcribe, bool smart,
-                     const QString &language = {});
+                     const QString &language = {}, int expectedSpeakers = 0);
     void scanLiveSpeech(bool flush);
     void receiveAudio(const QByteArray &block);
     void captureFinished();

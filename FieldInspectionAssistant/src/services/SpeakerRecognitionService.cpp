@@ -44,10 +44,15 @@ constexpr int SmartPauseFrames = 25;
 constexpr int SmartWindowFrames = 250;
 constexpr double SmartMatchThreshold = .60;
 constexpr double SmartNoveltyThreshold = .45;
+constexpr double SmartAdaptThreshold = .74;
+constexpr double SmartAdaptMargin = .12;
 constexpr int LiveWindowBytes = 2 * Rate * 24 / 10;
 constexpr int CaptureFrames = Rate * 80 / 1000;
 constexpr int WaveformBins = 640;
 constexpr int LiveRecognitionSeconds = 120;
+constexpr int LiveMeetingSeconds = 900;
+constexpr int LiveSpectrumStep = 1280;
+constexpr int MeetingMinimumSamples = 25 * Rate;
 constexpr int LiveEnrollmentSeconds = 30;
 constexpr float MinimumMargin = 0.05f;
 const auto ModelName = QStringLiteral("3dspeaker_speech_campplus_sv_zh-cn_16k-common.onnx");
@@ -445,9 +450,9 @@ public:
         }
         cv::Mat input(1,N,CV_32F);
         cv::Mat output;
+        const int hops = qMax(1,(step_+319)/320);
         while (columns_ < end) {
             std::array<float, Rows> peaks{};
-            const int hops = qMax(1,(step_+319)/320);
             for (int hop=0; hop<hops; ++hop) {
                 const int first = columns_*step_ + (2*hop+1)*step_/(2*hops) - N/2;
                 auto *in = input.ptr<float>();
@@ -541,13 +546,14 @@ public:
             resolve(createDiarizer_, "SherpaOnnxCreateOfflineSpeakerDiarization") &&
             resolve(destroyDiarizer_, "SherpaOnnxDestroyOfflineSpeakerDiarization") &&
             resolve(diarize_, "SherpaOnnxOfflineSpeakerDiarizationProcess") &&
+            resolve(setDiarizationConfig_, "SherpaOnnxOfflineSpeakerDiarizationSetConfig") &&
             resolve(diarizationCount_, "SherpaOnnxOfflineSpeakerDiarizationResultGetNumSegments") &&
             resolve(diarizationSegments_, "SherpaOnnxOfflineSpeakerDiarizationResultSortByStartTime") &&
             resolve(destroySegments_, "SherpaOnnxOfflineSpeakerDiarizationDestroySegment") &&
             resolve(destroyDiarization_, "SherpaOnnxOfflineSpeakerDiarizationDestroyResult")) {
             const auto segmentation = QFile::encodeName(root_.filePath(DiarizationModel));
             const auto embedding = QFile::encodeName(modelPath.absoluteFilePath());
-            const DiarizationConfig config{{{segmentation.constData(),.5f},2,0,"cpu"},
+            const DiarizationConfig config{{{segmentation.constData(),.25f},2,0,"cpu"},
                 {embedding.constData(),2,0,"cpu"},{-1,.48f,0},.23f,.12f};
             diarizer_ = createDiarizer_(&config);
         }
@@ -659,7 +665,7 @@ public:
         return compare(speakers(profiles),voice,{},threshold);
     }
 
-    QVariantMap smartWindow(const QByteArray &pcm, const SmartWindow &window, const QJsonArray &profiles,
+    QVariantMap smartWindow(const QByteArray &pcm, const SmartWindow &window, QJsonArray &profiles,
                             qint64 base, bool allowCreate, QJsonObject &created, const QStringList &excluded = {})
     {
         QElapsedTimer elapsed;
@@ -678,13 +684,34 @@ public:
                 row.remove("profile_id");
                 row.remove("language");
                 row["state"] = "unknown";
-                row["status"] = QObject::tr("同讲身份待确认");
+                row["status"] = QObject::tr("身份冲突待确认");
                 row["inference_ms"] = elapsed.elapsed();
                 return row;
             }
             const auto score = row.value("similarity");
             const bool novel = !score.isValid() || score.toDouble() < SmartNoveltyThreshold;
-            if (row.value("state") != "matched") {
+            if (row.value("state") == "matched") {
+                const double similarity = score.toDouble();
+                if (allowCreate && window.voiced >= SmartEnrollVoicedFrames && similarity >= SmartAdaptThreshold &&
+                    similarity < .95 && row.value("score_margin").toDouble() >= SmartAdaptMargin) {
+                    const auto id = row.value("profile_id").toString();
+                    for (int i=0; i<profiles.size(); ++i) {
+                        auto profile = profiles[i].toObject();
+                        if (profile.value("id").toString() != id || !profile.contains("auto_number"))
+                            continue;
+                        auto samples = profile.value("samples").toArray();
+                        if (samples.size() < MaxSamples) {
+                            QJsonArray vector;
+                            for (float value : voice)
+                                vector.append(value);
+                            samples.append(vector);
+                            profile["samples"] = samples;
+                            profiles[i] = profile;
+                        }
+                        break;
+                    }
+                }
+            } else {
                 if (novel && window.voiced >= SmartEnrollVoicedFrames && allowCreate && profiles.size() < MaxProfiles) {
                     int number = 0;
                     for (const auto &entry : profiles)
@@ -716,20 +743,23 @@ public:
     }
 
     QVariantMap analyzeConversation(const QByteArray &source, qint64 base, QJsonArray profiles, bool allowCreate,
-                                    bool transcribe, const QString &language, const std::atomic_bool &cancelled)
+                                    bool transcribe, const QString &language, const std::atomic_bool &cancelled,
+                                    int expectedSpeakers = 0)
     {
         QElapsedTimer elapsed;
         elapsed.start();
         QVariantList rows, overlaps;
         QJsonArray additions;
+        const auto originalProfiles = profiles;
         const auto pcm = highPass(source);
         const int samples = int(pcm.size()/2);
+        const bool meeting = samples >= MeetingMinimumSamples || expectedSpeakers > 0;
         QList<SpeechTrack> tracks;
         if (diarizer_ && samples >= Rate/4) {
-            QVector<float> signal(samples);
-            for (int i=0; i<samples; ++i)
-                signal[i] = qFromLittleEndian<qint16>(pcm.constData()+2*i)/32768.f;
-            const auto *result = diarize_(diarizer_,signal.constData(),samples);
+            DiarizationConfig configuration{};
+            configuration.clustering = {expectedSpeakers > 0 ? expectedSpeakers : -1,.48f,0};
+            setDiarizationConfig_(diarizer_, &configuration);
+            const auto *result = diarizeChunk(pcm, 0, samples);
             if (!result)
                 return error(QObject::tr("多人语音分析失败。"));
             if (const auto count = diarizationCount_(result); count > 0) {
@@ -801,14 +831,16 @@ public:
             if (cancelled)
                 return {};
             QStringList excluded;
-            for (const int other : coincident.value(speaker))
-                excluded.append(identities.value(other).value("profile_id").toString());
+            for (auto other=identities.cbegin(); other!=identities.cend(); ++other)
+                if (meeting || coincident.value(speaker).contains(other.key()))
+                    excluded.append(other.value().value("profile_id").toString());
             const auto sample = soloAudio.value(speaker);
             QVariantMap identity;
             if (sample.size() >= Rate*12/10) {
                 QJsonObject created;
-                identity = smartWindow(sample,{0,int(sample.size()/2),int(sample.size()/2/VadFrame)},profiles,
-                                       0,allowCreate,created,excluded);
+                const int voiced = int(sample.size()/2/VadFrame);
+                identity = smartWindow(sample,{0,int(sample.size()/2),voiced},profiles,
+                                       0,allowCreate && (!meeting || voiced >= 100),created,excluded);
                 if (!created.isEmpty()) {
                     additions.append(created);
                     profiles.append(created);
@@ -817,7 +849,7 @@ public:
                     ++embeddings;
             }
             if (identity.value("speaker").toString().isEmpty()) {
-                identity["speaker"] = QObject::tr("未确认 %1").arg(speakersInOrder.indexOf(speaker)+1);
+                identity["speaker"] = QObject::tr("会议轨道 %1").arg(speakersInOrder.indexOf(speaker)+1,2,10,QLatin1Char('0'));
                 identity["track_id"] = QStringLiteral("unconfirmed-%1-%2").arg(base).arg(speaker);
                 identity["state"] = "unknown";
                 if (identity.value("status").toString().isEmpty())
@@ -862,11 +894,13 @@ public:
             rows.append(row);
         }
         return {{"segments",rows},{"additions",additions},{"overlaps",overlaps},{"embeddings",embeddings},
+                {"profile_bank",profiles != originalProfiles ? QVariant(profiles) : QVariant()},
                 {"total_ms",elapsed.elapsed()},{"diarization",bool(diarizer_)}};
     }
 
     QVariantMap smartFile(const QString &path, double start, double length, bool transcribe, const QJsonArray &profiles,
-                          bool allowCreate, const QString &language, const std::atomic_bool &cancelled)
+                          bool allowCreate, const QString &language, const std::atomic_bool &cancelled,
+                          int expectedSpeakers)
     {
         QElapsedTimer elapsed;
         elapsed.start();
@@ -874,7 +908,7 @@ public:
         if (pcm.isEmpty())
             return error(QObject::tr("无法解码选定音频。"));
         const auto base = qRound64(start*1000);
-        auto result = analyzeConversation(pcm,base,profiles,allowCreate,transcribe,language,cancelled);
+        auto result = analyzeConversation(pcm,base,profiles,allowCreate,transcribe,language,cancelled,expectedSpeakers);
         if (cancelled || result.contains("error"))
             return result;
         const int step = qMax(320,int(pcm.size()/2+1799)/1800);
@@ -883,11 +917,20 @@ public:
         result["metrics"] = QVariantMap{{"smart",true},{"total_ms",elapsed.elapsed()},
             {"embeddings",result.value("embeddings")},{"offset_ms",base},{"audio_ms",qint64(pcm.size())*1000/(2*Rate)},
             {"threshold",SmartMatchThreshold},{"source",QFileInfo(path).fileName()},{"transcription",transcribe},{"asr_language",language},
+            {"expected_speakers",expectedSpeakers},
             {"overlaps",result.value("overlaps")},{"diarization",result.value("diarization")},{"spectrum_step_ms",step/16.}};
         return result;
     }
 
 private:
+    const DiarizationResult *diarizeChunk(const QByteArray &pcm, int first, int last)
+    {
+        QVector<float> signal(last-first);
+        for (int i=first; i<last; ++i)
+            signal[i-first] = qFromLittleEndian<qint16>(pcm.constData()+2*i)/32768.f;
+        return diarize_(diarizer_,signal.constData(),int(signal.size()));
+    }
+
     template<typename Function>
     bool resolve(Function &function, const char *symbol) {
         function = reinterpret_cast<Function>(library_.resolve(symbol));
@@ -932,6 +975,8 @@ private:
         }
         row["score"] = match ? QString::number(qBound(-1.f,first,1.f),'f',3) : QStringLiteral("—");
         row["similarity"] = match ? QVariant(qBound(-1.f,first,1.f)) : QVariant();
+        if (match)
+            row["score_margin"] = first-second;
         if (!match || first < threshold || first-second < MinimumMargin) {
             row["state"] = "unknown";
             row["status"] = match && first >= threshold ? QObject::tr("候选接近") : QObject::tr("未知发言人");
@@ -993,6 +1038,7 @@ private:
     const Diarizer *(*createDiarizer_)(const DiarizationConfig *) = nullptr;
     void (*destroyDiarizer_)(const Diarizer *) = nullptr;
     const DiarizationResult *(*diarize_)(const Diarizer *,const float *,qint32) = nullptr;
+    void (*setDiarizationConfig_)(const Diarizer *,const DiarizationConfig *) = nullptr;
     qint32 (*diarizationCount_)(const DiarizationResult *) = nullptr;
     const DiarizationSegment *(*diarizationSegments_)(const DiarizationResult *) = nullptr;
     void (*destroySegments_)(const DiarizationSegment *) = nullptr;
@@ -1172,11 +1218,17 @@ bool SpeakerRecognitionService::analyzeSmart(const QUrl &source, double start, d
 bool SpeakerRecognitionService::analyzeSmart(const QUrl &source, double start, double length, bool transcribe,
                                              const QString &language)
 {
-    return analyzeFile(source, start, length, SmartMatchThreshold, transcribe, true, language);
+    return analyzeSmartMeeting(source, start, length, transcribe, language, 0);
+}
+
+bool SpeakerRecognitionService::analyzeSmartMeeting(const QUrl &source, double start, double length, bool transcribe,
+                                                    const QString &language, int expectedSpeakers)
+{
+    return analyzeFile(source, start, length, SmartMatchThreshold, transcribe, true, language, expectedSpeakers);
 }
 
 bool SpeakerRecognitionService::analyzeFile(const QUrl &source, double start, double length, double threshold,
-                                          bool transcribe, bool smart, const QString &language)
+                                          bool transcribe, bool smart, const QString &language, int expectedSpeakers)
 {
     if (busy() || !ready_ || !session_->can("inspect"))
         return false;
@@ -1187,6 +1239,8 @@ bool SpeakerRecognitionService::analyzeFile(const QUrl &source, double start, do
         return fail(tr("声纹库或 Whisper 模型不可用。"));
     if (!validLanguage(language))
         return fail(tr("转写语言无效。"));
+    if (expectedSpeakers < 0 || expectedSpeakers > 20)
+        return fail(tr("会议人数须为自动或 1–20 人。"));
     operationError_.clear();
     segments_.clear();
     waveform_.clear();
@@ -1198,10 +1252,10 @@ bool SpeakerRecognitionService::analyzeFile(const QUrl &source, double start, do
     owner_ = session_->userId();
     cancelled_ = std::make_shared<std::atomic_bool>(false);
     status_ = tr("正在分析选定音频");
-    watcher_.setFuture(QtConcurrent::run(&pool_, [engine=engine_,path,start,length,threshold,transcribe,smart,language,
+    watcher_.setFuture(QtConcurrent::run(&pool_, [engine=engine_,path,start,length,threshold,transcribe,smart,language,expectedSpeakers,
                                                 profiles=profiles_,stop=cancelled_] {
         if (smart)
-            return engine->smartFile(path,start,length,transcribe,profiles,true,language,*stop);
+            return engine->smartFile(path,start,length,transcribe,profiles,true,language,*stop,expectedSpeakers);
         return engine->run(path,start,length,false,threshold,transcribe,profiles,*stop);
     }));
     emit changed();
@@ -1267,7 +1321,7 @@ bool SpeakerRecognitionService::startCapture(const QString &mode, double thresho
     speechWindows_.clear();
     smartSpeech_ = mode == "smart" ? std::make_unique<SmartSpeech>() : nullptr;
     smartCancel_ = smartSpeech_ ? std::make_shared<std::atomic_bool>(false) : nullptr;
-    spectrum_ = smartSpeech_ ? std::make_unique<SpeakerSpectrum>(320) : nullptr;
+    spectrum_ = smartSpeech_ ? std::make_unique<SpeakerSpectrum>(LiveSpectrumStep) : nullptr;
     liveCursor_ = 0;
     liveMatch_.clear();
     segments_.clear();
@@ -1278,10 +1332,10 @@ bool SpeakerRecognitionService::startCapture(const QString &mode, double thresho
     inputLevel_ = -90.;
     metrics_ = {{"source",tr("实时麦克风")},{"live",true},{"operation",mode},{"offset_ms",0},{"audio_ms",0},{"threshold",threshold},
                 {"embeddings",0},{"embedding_ms",0},{"total_ms",0},{"new_profiles",0},{"smart",bool(smartSpeech_)},
-                {"transcription",transcribe},{"asr_language",language},{"spectrum_step_ms",20}};
-    const int seconds = mode == "enrollment" ? LiveEnrollmentSeconds : LiveRecognitionSeconds;
-    livePcm_.reserve(seconds * 2 * Rate);
-    liveEnvelope_.reserve(seconds * Rate / (CaptureFrames / 2));
+                {"transcription",transcribe},{"asr_language",language},{"spectrum_step_ms",LiveSpectrumStep/16.}};
+    const int seconds = mode == "enrollment" ? LiveEnrollmentSeconds : smartSpeech_ ? LiveMeetingSeconds : LiveRecognitionSeconds;
+    livePcm_.reserve(qMin(seconds,LiveRecognitionSeconds) * 2 * Rate);
+    liveEnvelope_.reserve(qMin(seconds,LiveRecognitionSeconds) * Rate / (CaptureFrames / 2));
     status_ = tr("正在打开麦克风");
     capture_ = QThread::create([this, seconds] {
         const auto error = captureMicrophone(seconds, [this](QByteArray block) {
@@ -1478,11 +1532,9 @@ void SpeakerRecognitionService::completeLiveWindow()
         auto row = liveWatcher_.result();
         const auto additions = row.value("additions").toJsonArray();
         QVariantList rows = smartSpeech_ ? row.value("segments").toList() : QVariantList{row};
-        if (!additions.isEmpty()) {
-            auto candidate = profiles_;
-            for (const auto &profile : additions)
-                candidate.append(profile);
-            if (saveProfiles(candidate)) {
+        const auto bank = row.value("profile_bank");
+        if (bank.isValid()) {
+            if (saveProfiles(bank.toJsonArray())) {
                 metrics_["new_profiles"] = metrics_.value("new_profiles").toInt() + additions.size();
             } else {
                 smartSaveError_ = status_;
@@ -1565,11 +1617,9 @@ void SpeakerRecognitionService::complete()
         metrics_ = result.value("metrics").toMap();
         emit spectrumChanged();
         const auto additions = result.value("additions").toJsonArray();
-        if (!additions.isEmpty()) {
-            auto candidate = profiles_;
-            for (const auto &entry : additions)
-                candidate.append(entry);
-            if (!session_->can("inspect") || !saveProfiles(candidate)) {
+        const auto bank = result.value("profile_bank");
+        if (bank.isValid()) {
+            if (!session_->can("inspect") || !saveProfiles(bank.toJsonArray())) {
                 segments_.clear();
                 metrics_["embeddings"] = 0;
                 emit visualsChanged();

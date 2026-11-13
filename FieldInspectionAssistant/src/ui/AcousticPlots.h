@@ -14,6 +14,10 @@ class SpeakerTimelineItem : public QQuickPaintedItem
     Q_PROPERTY(QImage spectrogram READ spectrogram WRITE setSpectrogram NOTIFY dataChanged)
     Q_PROPERTY(int selectedIndex READ selectedIndex WRITE setSelectedIndex NOTIFY dataChanged)
     Q_PROPERTY(int chartHeight READ chartHeight NOTIFY dataChanged)
+    Q_PROPERTY(QString profileId READ profileId WRITE setProfileId NOTIFY dataChanged)
+    Q_PROPERTY(double viewStart READ viewStart WRITE setViewStart NOTIFY dataChanged)
+    Q_PROPERTY(double viewSpan READ viewSpan WRITE setViewSpan NOTIFY dataChanged)
+    Q_PROPERTY(int axesRevision READ axesRevision NOTIFY lanesChanged)
 public:
     explicit SpeakerTimelineItem(QQuickItem *parent = nullptr);
     QVariantList samples() const { return samples_; }
@@ -23,17 +27,27 @@ public:
     QImage spectrogram() const { return spectrogram_; }
     int selectedIndex() const { return selectedIndex_; }
     int chartHeight() const;
+    QString profileId() const { return profileId_; }
+    double viewStart() const { return viewStart_; }
+    double viewSpan() const { return viewSpan_; }
+    int axesRevision() const { return axesRevision_; }
     void setSamples(const QVariantList &value);
     void setSegments(const QVariantList &value);
     void setProfiles(const QVariantList &value);
     void setMetrics(const QVariantMap &value);
     void setSpectrogram(const QImage &value);
     void setSelectedIndex(int value);
+    void setProfileId(const QString &value);
+    void setViewStart(double value);
+    void setViewSpan(double value);
     Q_INVOKABLE int segmentAt(qreal x, qreal y) const;
+    Q_INVOKABLE QColor segmentColor(int index) const;
+    Q_INVOKABLE int segmentPosition(int index) const;
     void paint(QPainter *painter) override;
 
 signals:
     void dataChanged();
+    void lanesChanged();
 
 private:
     struct Lane { QString key, label; QColor color; };
@@ -42,6 +56,9 @@ private:
     QVariantList samples_, segments_, profiles_;
     QVariantMap metrics_;
     QImage spectrogram_;
+    QString profileId_;
+    double viewStart_ = 0., viewSpan_ = 1.;
+    int axesRevision_ = 0;
     QList<Lane> lanes_;
     int selectedIndex_ = -1;
 };
