@@ -109,8 +109,14 @@ qint64 recoverCapturedWav(const QString &path,int rate,int channels) {
         return -1;
     return checkpointWav(file,rate,channels,true);
 }
-NativeAudioCapture::NativeAudioCapture(const QVariantMap&device,const QString&folder,QObject*parent):QThread(parent),device_(device),rate_(device["rate"].toInt()),channels_(device["channels"].toInt()){
-    id_=QUuid::createUuid().toString(QUuid::WithoutBraces);QDir().mkpath(folder);path_=folder+"/"+QDateTime::currentDateTime().toString("yyyyMMdd_HHmmss")+"_"+id_.left(8)+".wav";ring_.resize(rate_*channels_*6);
+NativeAudioCapture::NativeAudioCapture(const QVariantMap&device,const QString&folder,QObject*parent,PcmConsumer consumer)
+    :QThread(parent),device_(device),rate_(device["rate"].toInt()),channels_(device["channels"].toInt()),
+      consumer_(std::move(consumer)){
+    if (!consumer_) {
+        id_=QUuid::createUuid().toString(QUuid::WithoutBraces);QDir().mkpath(folder);
+        path_=folder+"/"+QDateTime::currentDateTime().toString("yyyyMMdd_HHmmss")+"_"+id_.left(8)+".wav";
+        ring_.resize(rate_*channels_*6);
+    }
 }
 NativeAudioCapture::~NativeAudioCapture(){requestInterruption();wait(3000);}
 QVariantMap NativeAudioCapture::info()const{QMutexLocker lock(&mutex_);return {{"id",id_},{"path",path_},{"source",device_["name"]},{"fs",rate_},{"channels",channels_},{"started",started_},{"duration",double(frames_.load())/rate_},{"frames",QVariant::fromValue(frames_.load())},{"has_signal",hasSignal_.load()},{"finalized",finalized_.load()},{"xruns",QVariant::fromValue(xruns_.load())},{"packets",QVariant::fromValue(packets_.load())},{"checksum_errors",QVariant::fromValue(checksumErrors_.load())},{"transport",device_.value("transport","alsa")},{"error",error_},{"origin","sensor"}};}
@@ -125,6 +131,7 @@ QVector<double> NativeAudioCapture::latest(double seconds,int channel)const{auto
 void NativeAudioCapture::run(){
     if(device_.value("transport").toString()=="six_serial"){runSerial();return;}
     auto fail=[this](const QString&e){QMutexLocker lock(&mutex_);error_=e;};
+    if (consumer_) {fail("实时原始音频回调需要六麦串口");return;}
     if(rate_<4000||rate_>192000||channels_<1||channels_>8){fail("无效采集格式");return;}
     if(device_["id"].toString().contains("ListenGo")){
         QProcess wake;wake.start("/usr/bin/python3",{"-c","import sys;sys.path.insert(0,'/userdata/ai-workbench');from six_mic_control import wake_microphone;wake_microphone()"});if(!wake.waitForFinished(1500))wake.kill();
@@ -183,8 +190,8 @@ void NativeAudioCapture::runSerial(){
     auto packet=[](int type,const QByteArray&payload,quint16 identity=1){QByteArray out;out.append(char(0xA5));out.append(char(1));out.append(char(type));quint16 size=qToLittleEndian<quint16>(payload.size()),id=qToLittleEndian(identity);out.append(reinterpret_cast<const char*>(&size),2);out.append(reinterpret_cast<const char*>(&id),2);out.append(payload);unsigned sum=0;for(auto c:out)sum+=uchar(c);out.append(char(-sum));return out;};
     auto send=[&](const QByteArray&data){int offset=0;QElapsedTimer timeout;timeout.start();while(offset<data.size()&&timeout.elapsed()<500){auto n=::write(control.fd,data.constData()+offset,data.size()-offset);if(n>0)offset+=n;else{pollfd p{control.fd,POLLOUT,0};poll(&p,1,10);}}return offset==data.size();};
     QFile file(path_);
-    if(!file.open(QIODevice::WriteOnly|QIODevice::NewOnly|QIODevice::Unbuffered)
-        || flock(file.handle(),LOCK_EX|LOCK_NB)!=0 || file.write(wavHeader(0,rate_,channels_))!=44){
+    if(!consumer_ && (!file.open(QIODevice::WriteOnly|QIODevice::NewOnly|QIODevice::Unbuffered)
+        || flock(file.handle(),LOCK_EX|LOCK_NB)!=0 || file.write(wavHeader(0,rate_,channels_))!=44)){
         fail("无法创建六麦原始录音文件");return;
     }
     {QMutexLocker lock(&mutex_);started_=QDateTime::currentMSecsSinceEpoch()/1000.;}
@@ -202,7 +209,10 @@ void NativeAudioCapture::runSerial(){
             if(raw&&type==6){
                 packets_++;lastAudio.restart();payloadTail+=payload;if(payloadTail.size()<16)continue;int frames=payloadTail.size()/16;QByteArray pcm;pcm.reserve(frames*12);
                 for(int i=0;i<frames;i++)pcm.append(payloadTail.constData()+i*16,12);payloadTail.remove(0,frames*16);
-                if(!pcm.isEmpty()&&!appendPcm(file,pcm.constData(),pcm.size()))requestInterruption();
+                if(!pcm.isEmpty() && !(consumer_ ? consumer_(pcm) : appendPcm(file,pcm.constData(),pcm.size()))) {
+                    requestInterruption();
+                    return;
+                }
             }
         }
         if(bytes.size()>256*1024){checksumErrors_++;bytes=bytes.right(7);}
@@ -215,9 +225,11 @@ void NativeAudioCapture::runSerial(){
             for(int reads=0;reads<32;reads++){auto n=::read(ports[i].fd,block,sizeof(block));if(n<=0)break;bytes.append(block,n);consume(bytes,i==1);}
         }
         if(lastAudio.elapsed()>4000){fail("未收到有效六通道原始数据，请检查串口连接和模块固件");break;}
-        if(storage.elapsed()>5000){storage.restart();if(QStorageInfo(path_).bytesAvailable()<100*1024*1024){fail("剩余空间不足 100 MB");break;}if(checkpointWav(file,rate_,channels_,false)<0){fail("无法更新录音文件头");break;}}
+        if(!consumer_ && storage.elapsed()>5000){storage.restart();if(QStorageInfo(path_).bytesAvailable()<100*1024*1024){fail("剩余空间不足 100 MB");break;}if(checkpointWav(file,rate_,channels_,false)<0){fail("无法更新录音文件头");break;}}
     }
     send(packet(5,"{\"type\":\"get_original_audio\",\"content\":{\"audio\":0}}",2));
+    if (consumer_)
+        return;
     const auto saved=checkpointWav(file,rate_,channels_,true);
     finalized_=saved>0;
     if(saved<0)fail("录音未能安全保存");

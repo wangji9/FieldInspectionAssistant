@@ -17,7 +17,7 @@ Rectangle {
     readonly property int axesRevision: chart.axesRevision
     signal selected(int index)
 
-    implicitHeight: Math.min(570, chart.chartHeight+37)
+    implicitHeight: Math.min(570, chart.chartHeight+31)
     color: "#ffffff"
     border.color: Colors.border
     function changeZoom(factor) {
@@ -55,7 +55,7 @@ Rectangle {
 
     Row {
         id: toolbar
-        anchors { top: parent.top; left: parent.left; right: parent.right; margins: 5 }
+        anchors { top: parent.top; left: parent.left; right: parent.right; margins: 3 }
         spacing: 5
         TouchButton {
             objectName: "speakerZoomOut"

@@ -36,6 +36,7 @@ Item {
     Connections {
         target: App.session
         function onSessionEnding() {
+            sourceMode.currentIndex = 0
             pane.source = ""
             pane.sourceLabel = ""
             pane.feedback = ""
@@ -73,17 +74,20 @@ Item {
 
     ColumnLayout {
         anchors.fill: parent
-        spacing: 6
+        spacing: 4
         Flow {
             id: controls
+            objectName: "speakerControls"
             Layout.fillWidth: true
-            Layout.preferredHeight: childrenRect.height
+            Layout.minimumHeight: implicitHeight
+            Layout.preferredHeight: implicitHeight
+            Layout.maximumHeight: implicitHeight
             spacing: 5
             AppComboBox {
                 id: sourceMode
                 objectName: "speakerSourceMode"
-                width: 132; height: 30
-                model: ["实时麦克风", "音频文件"]
+                width: 166; height: 30
+                model: ["ListenGo 六麦阵列", "音频文件"]
                 enabled: !pane.service.busy
                 Accessible.name: "智能声纹分析输入"
             }
@@ -179,8 +183,9 @@ Item {
         }
         ScrollView {
             id: panelScroll
+            objectName: "speakerWorkspace"
             readonly property bool narrow: width < 640
-            readonly property real panelHeight: Math.max(height - topPadding - bottomPadding, narrow ? 750 : 580)
+            readonly property real panelHeight: Math.max(height - topPadding - bottomPadding, narrow ? 620 : 445)
             Layout.fillWidth: true; Layout.fillHeight: true
             Layout.minimumHeight: 0
             contentWidth: availableWidth
@@ -232,9 +237,9 @@ Item {
                             id: speakerPlot
                             objectName: "speakerTimeline"
                             Layout.fillWidth: true
-                            Layout.fillHeight: true
                             Layout.minimumHeight: Math.min(330, implicitHeight)
-                            Layout.preferredHeight: implicitHeight
+                            Layout.preferredHeight: Math.max(330, Math.min(implicitHeight,
+                                panelScroll.panelHeight - (panelScroll.narrow ? 310 : 146)))
                             samples: pane.service.waveform
                             segments: pane.service.segments
                             profiles: pane.service.profiles
@@ -250,8 +255,9 @@ Item {
                         }
                         Rectangle {
                             Layout.fillWidth: true
-                            Layout.preferredHeight: 147
-                            Layout.minimumHeight: 122
+                            Layout.fillHeight: true
+                            Layout.preferredHeight: 110
+                            Layout.minimumHeight: 90
                             color: "#ffffff"
                             border.color: Colors.border
 

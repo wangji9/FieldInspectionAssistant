@@ -1,13 +1,16 @@
 #pragma once
 #include <QtCore>
 #include <atomic>
+#include <functional>
 #include <memory>
 #include <vector>
 
 // The audio producer never waits for DSP, Python, SQL or the GUI event loop.
 class NativeAudioCapture final:public QThread{
 public:
-    NativeAudioCapture(const QVariantMap &device,const QString &folder,QObject *parent=nullptr);
+    using PcmConsumer = std::function<bool(const QByteArray &)>;
+    NativeAudioCapture(const QVariantMap &device,const QString &folder,QObject *parent=nullptr,
+                       PcmConsumer consumer = {});
     ~NativeAudioCapture() override;
     QVector<double> latest(double seconds,int channel)const;
     QByteArray latestPcm(double seconds, quint64 *endFrame = nullptr, qint64 *receivedMs = nullptr)const;
@@ -24,6 +27,7 @@ private:
     std::atomic<quint64>packets_{0},checksumErrors_{0};
     std::atomic_bool hasSignal_{false};
     std::atomic_bool finalized_{false};
+    PcmConsumer consumer_;
 };
 
 class NativeSignalAnalyzer final:public QThread{

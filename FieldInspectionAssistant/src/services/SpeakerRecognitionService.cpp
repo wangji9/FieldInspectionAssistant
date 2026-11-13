@@ -1,4 +1,5 @@
 #include "SpeakerRecognitionService.h"
+#include "NativeSignalPipeline.h"
 #include "../app/SessionManager.h"
 
 #include <QDataStream>
@@ -48,6 +49,7 @@ constexpr double SmartAdaptThreshold = .74;
 constexpr double SmartAdaptMargin = .12;
 constexpr int LiveWindowBytes = 2 * Rate * 24 / 10;
 constexpr int CaptureFrames = Rate * 80 / 1000;
+constexpr int ArrayChannels = 6;
 constexpr int WaveformBins = 640;
 constexpr int LiveRecognitionSeconds = 120;
 constexpr int LiveMeetingSeconds = 900;
@@ -326,6 +328,73 @@ QString captureMicrophone(int seconds, const std::function<void(QByteArray)> &de
     }
     return {};
 }
+
+class SixMicVoice
+{
+public:
+    explicit SixMicVoice(int seconds) : blocksLeft_(seconds * Rate / CaptureFrames) {}
+
+    bool consume(const QByteArray &pcm, const std::function<void(QByteArray)> &deliver)
+    {
+        pending_.append(pcm);
+        constexpr int blockBytes = CaptureFrames * ArrayChannels * 2;
+        int offset = 0;
+        while (blocksLeft_ && pending_.size() - offset >= blockBytes) {
+            deliver(monoBlock(pending_.constData() + offset));
+            offset += blockBytes;
+            --blocksLeft_;
+        }
+        pending_.remove(0, offset);
+        return blocksLeft_ > 0;
+    }
+
+private:
+    QByteArray monoBlock(const char *raw)
+    {
+        std::array<float,ArrayChannels> energy{};
+        std::array<qint16,CaptureFrames*ArrayChannels> samples{};
+        for (int i=0; i<CaptureFrames; ++i) {
+            for (int channel=0; channel<ArrayChannels; ++channel) {
+                const int index = i*ArrayChannels+channel;
+                const float value = qFromLittleEndian<qint16>(raw+2*index);
+                // Exclude DC and low-frequency rumble when comparing microphones.
+                filtered_[channel] = .9615f*(filtered_[channel]+value-previous_[channel]);
+                previous_[channel] = value;
+                const float clean = std::clamp(filtered_[channel],-32768.f,32767.f);
+                samples[index] = qint16(clean);
+                energy[channel] += clean*clean;
+            }
+        }
+        int best = selected_;
+        for (int channel=0; channel<ArrayChannels; ++channel) {
+            const float rms = std::sqrt(energy[channel]/CaptureFrames);
+            energy[channel] = rms;
+            const float rate = rms < noise_[channel] ? .2f : .004f;
+            noise_[channel] = qMax(24.f,noise_[channel]+rate*(rms-noise_[channel]));
+        }
+        const auto score = [&](int channel) { return energy[channel]/noise_[channel]; };
+        for (int channel=0; channel<ArrayChannels; ++channel)
+            if (score(channel)>score(best))
+                best = channel;
+        if (score(best) < score(selected_)*1.25f || energy[best] < 65.f)
+            best = selected_;
+        QByteArray mono(CaptureFrames*2,Qt::Uninitialized);
+        constexpr int fadeFrames = Rate/100;
+        for (int i=0; i<CaptureFrames; ++i) {
+            const int index = i*ArrayChannels;
+            const float mix = qMin(i,fadeFrames)/float(fadeFrames);
+            const auto value = qint16((1.f-mix)*samples[index+selected_]+mix*samples[index+best]);
+            qToLittleEndian<qint16>(value,mono.data()+2*i);
+        }
+        selected_ = best;
+        return mono;
+    }
+
+    QByteArray pending_;
+    std::array<float,ArrayChannels> previous_{}, filtered_{};
+    std::array<float,ArrayChannels> noise_{36,36,36,36,36,36};
+    int selected_ = 0, blocksLeft_;
+};
 
 QString timeLabel(qint64 ms)
 {
@@ -1309,8 +1378,11 @@ bool SpeakerRecognitionService::startLiveEnrollment(const QString &id, const QSt
 
 bool SpeakerRecognitionService::startCapture(const QString &mode, double threshold, bool transcribe, const QString &language)
 {
+    const bool arrayInput = mode == "smart";
     if (captureGuard_ && captureGuard_())
         return fail(tr("音频设备正在使用，请结束当前采集后再试。"));
+    if (arrayInput && (!QFileInfo::exists("/dev/lg_speech_serial") || !QFileInfo::exists("/dev/lg_speech_uac")))
+        return fail(tr("未检测到 ListenGo 六麦，请连接设备后重试。"));
     operationError_.clear();
     owner_ = session_->userId();
     liveMode_ = mode;
@@ -1330,20 +1402,31 @@ bool SpeakerRecognitionService::startCapture(const QString &mode, double thresho
     liveEnvelope_.clear();
     livePcm_.clear();
     inputLevel_ = -90.;
-    metrics_ = {{"source",tr("实时麦克风")},{"live",true},{"operation",mode},{"offset_ms",0},{"audio_ms",0},{"threshold",threshold},
+    metrics_ = {{"source",arrayInput ? tr("ListenGo 六麦阵列") : tr("实时麦克风")},
+                {"input_channels",arrayInput ? ArrayChannels : 1},
+                {"live",true},{"operation",mode},{"offset_ms",0},{"audio_ms",0},{"threshold",threshold},
                 {"embeddings",0},{"embedding_ms",0},{"total_ms",0},{"new_profiles",0},{"smart",bool(smartSpeech_)},
                 {"transcription",transcribe},{"asr_language",language},{"spectrum_step_ms",LiveSpectrumStep/16.}};
     const int seconds = mode == "enrollment" ? LiveEnrollmentSeconds : smartSpeech_ ? LiveMeetingSeconds : LiveRecognitionSeconds;
     livePcm_.reserve(qMin(seconds,LiveRecognitionSeconds) * 2 * Rate);
     liveEnvelope_.reserve(qMin(seconds,LiveRecognitionSeconds) * Rate / (CaptureFrames / 2));
     status_ = tr("正在打开麦克风");
-    capture_ = QThread::create([this, seconds] {
-        const auto error = captureMicrophone(seconds, [this](QByteArray block) {
-            QMetaObject::invokeMethod(this, [this, block = std::move(block)] { receiveAudio(block); }, Qt::QueuedConnection);
+    const auto deliver = [this](QByteArray block) {
+        QMetaObject::invokeMethod(this,[this,block=std::move(block)]{receiveAudio(block);},Qt::QueuedConnection);
+    };
+    if (arrayInput) {
+        auto *native = new NativeAudioCapture({{"name",tr("ListenGo 六麦阵列")},{"transport","six_serial"},
+            {"rate",Rate},{"channels",ArrayChannels}}, {}, this,
+            [voice=SixMicVoice(seconds),deliver](const QByteArray &pcm) mutable {return voice.consume(pcm,deliver);});
+        capture_ = native;
+        connect(native,&QThread::finished,this,[this,native]{captureError_ = native->info().value("error").toString();});
+    } else {
+        capture_ = QThread::create([this,seconds,deliver] {
+            const auto error = captureMicrophone(seconds,deliver);
+            if (!error.isEmpty())
+                QMetaObject::invokeMethod(this,[this,error]{captureError_ = error;},Qt::QueuedConnection);
         });
-        if (!error.isEmpty())
-            QMetaObject::invokeMethod(this, [this, error] { captureError_ = error; }, Qt::QueuedConnection);
-    });
+    }
     capture_->setParent(this);
     connect(capture_, &QThread::finished, this, &SpeakerRecognitionService::captureFinished);
     capture_->start();
