@@ -96,9 +96,10 @@ struct DiarizationConfig {
 constexpr auto DiarizationModel = "models/pyannote-segmentation-3.0.int8.onnx";
 constexpr auto PreciseDiarizationModel = "models/pyannote-segmentation-3.0.onnx";
 constexpr auto DiarizationEmbeddingModel = "models/3dspeaker_speech_campplus_sv_zh_en_16k-common_advanced.onnx";
-constexpr auto MeetingVerificationModel = "models/3dspeaker_speech_eres2netv2_sv_zh-cn_16k-common.onnx";
+constexpr auto MeetingVerificationModel = "models/wespeaker_en_voxceleb_resnet34_LM.onnx";
+constexpr int MeetingVerificationDimension = 256;
 constexpr float PreciseClusteringDistance = .68f;
-constexpr float TrackMergeSimilarity = .45f;
+constexpr float TrackMergeSimilarity = .50f;
 constexpr int ShortTrackSamples = 15*Rate;
 
 struct SpeechTrack { int first, last, speaker; };
@@ -200,7 +201,8 @@ bool validProfile(const QString &name, const QString &language)
     return !name.trimmed().isEmpty() && name.trimmed().size() <= 80 && validLanguage(language);
 }
 
-bool normalize(Embedding &data)
+template<std::size_t Size>
+bool normalize(std::array<float, Size> &data)
 {
     const float norm = std::sqrt(std::inner_product(data.begin(), data.end(), data.begin(), 0.0f));
     if (!std::isfinite(norm) || norm < 1e-8f)
@@ -1199,14 +1201,14 @@ public:
     }
 
 private:
-    const SherpaExtractor *openMeetingExtractor(const QString &path)
+    const SherpaExtractor *openMeetingExtractor(const QString &path, int dimension)
     {
         if (!QFileInfo::exists(path))
             return nullptr;
         const auto model = QFile::encodeName(path);
         const SherpaConfig config{model.constData(),2,0,"cpu"};
         const auto *extractor = createExtractor_(&config);
-        if (extractor && dimension_(extractor) != Dimension) {
+        if (extractor && dimension_(extractor) != dimension) {
             destroyExtractor_(extractor);
             return nullptr;
         }
@@ -1218,13 +1220,17 @@ private:
                                     const std::atomic_bool &cancelled)
     {
         if (!meetingVerifier_)
-            meetingVerifier_ = openMeetingExtractor(root_.filePath(MeetingVerificationModel));
+            meetingVerifier_ = openMeetingExtractor(root_.filePath(MeetingVerificationModel),MeetingVerificationDimension);
         if (meetingVerifier_ && !meetingEmbedder_)
-            meetingEmbedder_ = openMeetingExtractor(root_.filePath(DiarizationEmbeddingModel));
+            meetingEmbedder_ = openMeetingExtractor(root_.filePath(DiarizationEmbeddingModel),Dimension);
         if (!meetingEmbedder_)
             return {};
 
-        struct TrackVoice { int id; Embedding verify, cluster; };
+        struct TrackVoice {
+            int id;
+            std::array<float, MeetingVerificationDimension> verify;
+            Embedding cluster;
+        };
         QList<TrackVoice> voices;
         for (auto it=solo.cbegin(); it!=solo.cend() && !cancelled; ++it) {
             auto ranges = it.value();
@@ -1262,7 +1268,8 @@ private:
                     continue;
                 const float verification = std::inner_product(a.verify.begin(),a.verify.end(),b.verify.begin(),0.f);
                 const float clustering = std::inner_product(a.cluster.begin(),a.cluster.end(),b.cluster.begin(),0.f);
-                similarity[i*n+j] = similarity[j*n+i] = (verification+clustering)*.5f;
+                // Keep the bilingual score dominant for short, far-field turns.
+                similarity[i*n+j] = similarity[j*n+i] = .25f*verification + .75f*clustering;
             }
         }
         QList<QList<int>> groups;
@@ -1309,7 +1316,9 @@ private:
         return function;
     }
 
-    bool embed(const QByteArray &pcm, int first, int last, Embedding &out, const SherpaExtractor *extractor = nullptr)
+    template<std::size_t Size>
+    bool embed(const QByteArray &pcm, int first, int last, std::array<float, Size> &out,
+               const SherpaExtractor *extractor = nullptr)
     {
         if (!extractor)
             extractor = extractor_;
@@ -1323,7 +1332,7 @@ private:
         inputFinished_(stream);
         const auto *result = isReady_(extractor, stream) ? compute_(extractor, stream) : nullptr;
         if (result) {
-            std::copy_n(result, Dimension, out.begin());
+            std::copy_n(result, Size, out.begin());
             destroyEmbedding_(result);
         }
         destroyStream_(stream);

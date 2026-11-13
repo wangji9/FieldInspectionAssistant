@@ -14,7 +14,7 @@ whisper='sherpa-onnx-whisper-tiny.tar.bz2'
 diarization='pyannote-segmentation-3.0.int8.onnx'
 precise_diarization='pyannote-segmentation-3.0.onnx'
 clustering_embedding='3dspeaker_speech_campplus_sv_zh_en_16k-common_advanced.onnx'
-meeting_verifier='3dspeaker_speech_eres2netv2_sv_zh-cn_16k-common.onnx'
+meeting_verifier='wespeaker_en_voxceleb_resnet34_LM.onnx'
 
 fetch() {
     local name="$1" digest="$2" url="$3"
@@ -38,7 +38,7 @@ fetch "$precise_diarization" 220ad67ca923bef2fa91f2390c786097bf305bceb5e261d4af6
     "https://huggingface.co/csukuangfj/sherpa-onnx-pyannote-segmentation-3-0/resolve/main/model.onnx"
 fetch "$clustering_embedding" aa3cfc16963a10586a9393f5035d6d6b57e98d358b347f80c2a30bf4f00ceba2 \
     "https://huggingface.co/csukuangfj/speaker-embedding-models/resolve/main/$clustering_embedding"
-fetch "$meeting_verifier" bf1a75b9930474cf3389ef415e6e5d38ca96fea4a3a00f7e301d080a58ee2239 \
+fetch "$meeting_verifier" e9848563da86f263117134dfd7ad63c92355b37de492b55e325400c9d9c39012 \
     "https://huggingface.co/csukuangfj/speaker-embedding-models/resolve/main/$meeting_verifier"
 
 stage="$(mktemp -d "$(dirname -- "$runtime")/.speaker-install.XXXXXXXX")"
