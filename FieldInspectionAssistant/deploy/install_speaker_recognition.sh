@@ -12,6 +12,8 @@ release='sherpa-onnx-v2.0.1-linux-aarch64-shared-cpu.tar.bz2'
 speaker='3dspeaker_speech_campplus_sv_zh-cn_16k-common.onnx'
 whisper='sherpa-onnx-whisper-tiny.tar.bz2'
 diarization='pyannote-segmentation-3.0.int8.onnx'
+precise_diarization='pyannote-segmentation-3.0.onnx'
+clustering_embedding='3dspeaker_speech_campplus_sv_zh_en_16k-common_advanced.onnx'
 
 fetch() {
     local name="$1" digest="$2" url="$3"
@@ -31,6 +33,10 @@ fetch "$whisper" c46116994e539aa165266d96b325252728429c12535eb9d8b6a2b10f129e66b
     "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/$whisper"
 fetch "$diarization" d582f4b4c6b48205de7e0643c57df0df5615a3c176189be3fc461e9d18827b5d \
     "https://huggingface.co/csukuangfj/sherpa-onnx-pyannote-segmentation-3-0/resolve/main/model.int8.onnx"
+fetch "$precise_diarization" 220ad67ca923bef2fa91f2390c786097bf305bceb5e261d4af67b38e938e1079 \
+    "https://huggingface.co/csukuangfj/sherpa-onnx-pyannote-segmentation-3-0/resolve/main/model.onnx"
+fetch "$clustering_embedding" aa3cfc16963a10586a9393f5035d6d6b57e98d358b347f80c2a30bf4f00ceba2 \
+    "https://huggingface.co/csukuangfj/speaker-embedding-models/resolve/main/$clustering_embedding"
 
 stage="$(mktemp -d "$(dirname -- "$runtime")/.speaker-install.XXXXXXXX")"
 trap 'rm -rf -- "$stage"' EXIT
@@ -38,6 +44,7 @@ tar --no-same-owner --no-same-permissions -xjf "$cache/$release" -C "$stage" --s
 install -d "$stage/models" "$stage/whisper"
 install -m 0644 "$cache/$speaker" "$stage/models/$speaker"
 install -m 0644 "$cache/$diarization" "$stage/models/$diarization"
+install -m 0644 "$cache/$precise_diarization" "$cache/$clustering_embedding" "$stage/models/"
 tar --no-same-owner --no-same-permissions -xjf "$cache/$whisper" -C "$stage/whisper" --strip-components=1 \
     sherpa-onnx-whisper-tiny/tiny-encoder.int8.onnx \
     sherpa-onnx-whisper-tiny/tiny-decoder.int8.onnx \

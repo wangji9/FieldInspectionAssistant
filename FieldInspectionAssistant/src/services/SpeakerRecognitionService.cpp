@@ -94,6 +94,9 @@ struct DiarizationConfig {
     float minimumSpeech, minimumGap;
 };
 constexpr auto DiarizationModel = "models/pyannote-segmentation-3.0.int8.onnx";
+constexpr auto PreciseDiarizationModel = "models/pyannote-segmentation-3.0.onnx";
+constexpr auto DiarizationEmbeddingModel = "models/3dspeaker_speech_campplus_sv_zh_en_16k-common_advanced.onnx";
+constexpr float PreciseClusteringDistance = .68f;
 
 struct SpeechTrack { int first, last, speaker; };
 
@@ -738,11 +741,22 @@ public:
             resolve(diarizationSegments_, "SherpaOnnxOfflineSpeakerDiarizationResultSortByStartTime") &&
             resolve(destroySegments_, "SherpaOnnxOfflineSpeakerDiarizationDestroySegment") &&
             resolve(destroyDiarization_, "SherpaOnnxOfflineSpeakerDiarizationDestroyResult")) {
-            const auto segmentation = QFile::encodeName(root_.filePath(DiarizationModel));
-            const auto embedding = QFile::encodeName(modelPath.absoluteFilePath());
-            const DiarizationConfig config{{{segmentation.constData(),.25f},2,0,"cpu"},
-                {embedding.constData(),2,0,"cpu"},{-1,.48f,0},.23f,.12f};
-            diarizer_ = createDiarizer_(&config);
+            const auto create = [&](const QString &segmentationPath, const QString &embeddingPath, bool precise) {
+                const auto segmentation = QFile::encodeName(segmentationPath);
+                const auto embedding = QFile::encodeName(embeddingPath);
+                const DiarizationConfig config{{{segmentation.constData(),precise ? .20f : .25f},2,0,"cpu"},
+                    {embedding.constData(),2,0,"cpu"},{-1,precise ? PreciseClusteringDistance : .48f,0},
+                    precise ? .16f : .23f,precise ? .10f : .12f};
+                return createDiarizer_(&config);
+            };
+            const auto preciseModel = root_.filePath(PreciseDiarizationModel);
+            const auto clusteringModel = root_.filePath(DiarizationEmbeddingModel);
+            if (QFileInfo::exists(preciseModel) && QFileInfo::exists(clusteringModel)) {
+                diarizer_ = create(preciseModel, clusteringModel, true);
+                preciseDiarizer_ = diarizer_ != nullptr;
+            }
+            if (!diarizer_)
+                diarizer_ = create(root_.filePath(DiarizationModel), modelPath.absoluteFilePath(), false);
         }
         return {{"loaded",true},{"whisper",whisperAvailable()},{"diarization",bool(diarizer_)}};
     }
@@ -944,9 +958,10 @@ public:
         QList<SpeechTrack> tracks;
         if (diarizer_ && samples >= Rate/4) {
             DiarizationConfig configuration{};
-            configuration.clustering = {expectedSpeakers > 0 ? expectedSpeakers : -1,.48f,0};
+            configuration.clustering = {expectedSpeakers > 0 ? expectedSpeakers : -1,
+                preciseDiarizer_ ? PreciseClusteringDistance : .48f,0};
             setDiarizationConfig_(diarizer_, &configuration);
-            const auto *result = diarizeChunk(pcm, 0, samples);
+            const auto *result = diarizeChunk(preciseDiarizer_ ? source : pcm, 0, samples);
             if (!result)
                 return error(QObject::tr("多人语音分析失败。"));
             if (const auto count = diarizationCount_(result); count > 0) {
@@ -954,7 +969,7 @@ public:
                 for (int i=0; segments && i<count; ++i) {
                     const int first = std::clamp(qRound(segments[i].start*Rate),0,samples);
                     const int last = std::clamp(qRound(segments[i].end*Rate),first,samples);
-                    if (last-first >= Rate/6)
+                    if (last-first >= (preciseDiarizer_ ? Rate*15/100 : Rate/6))
                         tracks.append({first,last,segments[i].speaker});
                 }
                 if (segments)
@@ -974,6 +989,7 @@ public:
         }
         QMap<int,QByteArray> soloAudio;
         QMap<int,QList<VoiceRegion>> soloRanges;
+        QList<VoiceRegion> overlapRanges;
         QMap<int,QSet<int>> coincident;
         QList<int> speakersInOrder;
         for (const auto &track : tracks) {
@@ -995,6 +1011,7 @@ public:
                 else
                     ranges.append({first,last});
             } else if (active.size() > 1) {
+                overlapRanges.append({first,last});
                 for (const auto speaker : active.keys())
                     for (const auto other : active.keys())
                         if (speaker != other)
@@ -1053,28 +1070,57 @@ public:
             auto row = identities.value(track.speaker);
             row["voiced_ms"] = (track.last-track.first)*1000/Rate;
             setSpan(row,base+qint64(track.first)*1000/Rate,base+qint64(track.last)*1000/Rate);
-            const bool overlap = std::any_of(tracks.cbegin(),tracks.cend(),[&](const SpeechTrack &other){
-                return track.speaker!=other.speaker && track.first<other.last && other.first<track.last;
-            });
+            const auto overlapIt = std::lower_bound(overlapRanges.cbegin(),overlapRanges.cend(),track.first,
+                [](const VoiceRegion &range, int start) { return range.last <= start; });
+            const bool overlap = overlapIt != overlapRanges.cend() && overlapIt->first < track.last;
             row["overlap"] = overlap;
             row["mode"] = overlap ? QObject::tr("含同讲") : QObject::tr("单人");
             if (transcribe) {
                 QStringList phrases;
                 QVariantList words;
                 bool attempted = false, failed = false;
-                for (const auto &solo : soloRanges.value(track.speaker)) {
-                    const int limit = qMin(solo.last,track.last);
-                    for (int first = qMax(solo.first,track.first); limit-first >= Rate*7/10 && !cancelled;) {
+                const auto &ranges = soloRanges[track.speaker];
+                auto soloIt = std::lower_bound(ranges.cbegin(),ranges.cend(),track.first,
+                    [](const VoiceRegion &range, int start) { return range.last <= start; });
+                const auto decodeSpan = [&](const QByteArray &audio, int offset, int length, int first, int last) {
+                    attempted = true;
+                    const auto value = asr.transcribe(audio,offset,offset+length);
+                    if (value.isEmpty()) {
+                        failed = true;
+                        return;
+                    }
+                    phrases.append(value);
+                    QVariantMap phrase{{"text",value},{"model",AsrName}};
+                    setSpan(phrase,base+qint64(first)*1000/Rate,base+qint64(last)*1000/Rate);
+                    words.append(phrase);
+                };
+                for (; soloIt != ranges.cend() && soloIt->first < track.last && !cancelled;) {
+                    const int start = qMax(soloIt->first,track.first);
+                    int limit = qMin(soloIt->last,track.last);
+                    ++soloIt;
+                    if (soloIt != ranges.cend() && soloIt->first < track.last &&
+                        soloIt->first-limit <= Rate*35/100 &&
+                        qMin(soloIt->last,track.last)-start <= AsrChunkSamples) {
+                        // Replace brief interruptions with silence to preserve context and timestamps.
+                        auto joined = transcriptPcm.mid(start*2,(limit-start)*2);
+                        int voiced = limit-start;
+                        do {
+                            const int next = soloIt->first;
+                            joined.append(QByteArray((next-limit)*2,'\0'));
+                            limit = qMin(soloIt->last,track.last);
+                            joined.append(transcriptPcm.constData()+next*2,(limit-next)*2);
+                            voiced += limit-next;
+                            ++soloIt;
+                        } while (soloIt != ranges.cend() && soloIt->first < track.last &&
+                                 soloIt->first-limit <= Rate*35/100 &&
+                                 qMin(soloIt->last,track.last)-start <= AsrChunkSamples);
+                        if (voiced >= Rate/2)
+                            decodeSpan(joined,0,limit-start,start,limit);
+                        continue;
+                    }
+                    for (int first = start; limit-first >= Rate/2 && !cancelled;) {
                         const int last = transcriptBoundary(transcriptPcm,first,limit);
-                        attempted = true;
-                        const auto value = asr.transcribe(transcriptPcm,first,last);
-                        if (!value.isEmpty()) {
-                            phrases.append(value);
-                            QVariantMap phrase{{"text",value},{"model",AsrName}};
-                            setSpan(phrase,base+qint64(first)*1000/Rate,base+qint64(last)*1000/Rate);
-                            words.append(phrase);
-                        } else
-                            failed = true;
+                        decodeSpan(transcriptPcm,first,last-first,first,last);
                         first = last;
                     }
                 }
@@ -1233,6 +1279,7 @@ private:
     const SherpaExtractor *extractor_ = nullptr;
     const Diarizer *diarizer_ = nullptr;
     const Diarizer *(*createDiarizer_)(const DiarizationConfig *) = nullptr;
+    bool preciseDiarizer_ = false;
     void (*destroyDiarizer_)(const Diarizer *) = nullptr;
     const DiarizationResult *(*diarize_)(const Diarizer *,const float *,qint32) = nullptr;
     void (*setDiarizationConfig_)(const Diarizer *,const DiarizationConfig *) = nullptr;
