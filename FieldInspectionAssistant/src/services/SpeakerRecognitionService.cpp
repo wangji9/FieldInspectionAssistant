@@ -96,7 +96,10 @@ struct DiarizationConfig {
 constexpr auto DiarizationModel = "models/pyannote-segmentation-3.0.int8.onnx";
 constexpr auto PreciseDiarizationModel = "models/pyannote-segmentation-3.0.onnx";
 constexpr auto DiarizationEmbeddingModel = "models/3dspeaker_speech_campplus_sv_zh_en_16k-common_advanced.onnx";
+constexpr auto MeetingVerificationModel = "models/3dspeaker_speech_eres2netv2_sv_zh-cn_16k-common.onnx";
 constexpr float PreciseClusteringDistance = .68f;
+constexpr float TrackMergeSimilarity = .45f;
+constexpr int ShortTrackSamples = 15*Rate;
 
 struct SpeechTrack { int first, last, speaker; };
 
@@ -698,6 +701,10 @@ public:
     ~SpeakerRecognitionEngine() {
         if (diarizer_)
             destroyDiarizer_(diarizer_);
+        if (meetingVerifier_)
+            destroyExtractor_(meetingVerifier_);
+        if (meetingEmbedder_)
+            destroyExtractor_(meetingEmbedder_);
         if (extractor_)
             destroyExtractor_(extractor_);
     }
@@ -987,7 +994,6 @@ public:
             events[track.first].append({track.speaker,1});
             events[track.last].append({track.speaker,-1});
         }
-        QMap<int,QByteArray> soloAudio;
         QMap<int,QList<VoiceRegion>> soloRanges;
         QList<VoiceRegion> overlapRanges;
         QMap<int,QSet<int>> coincident;
@@ -1002,9 +1008,6 @@ public:
             const int last = event.key();
             if (active.size() == 1 && last-first >= Rate/12) {
                 const int speaker = active.firstKey();
-                auto &audio = soloAudio[speaker];
-                const int bytes = std::min(2*(last-first),6*2*Rate-int(audio.size()));
-                audio.append(pcm.constData()+2*first,bytes);
                 auto &ranges = soloRanges[speaker];
                 if (!ranges.isEmpty() && ranges.last().last == first)
                     ranges.last().last = last;
@@ -1029,6 +1032,30 @@ public:
             }
             first = last;
         }
+        if (preciseDiarizer_ && meeting && expectedSpeakers == 0 && speakersInOrder.size() > 1) {
+            QMap<int,int> durations;
+            for (const auto &track : tracks)
+                durations[track.speaker] += track.last-track.first;
+            const auto aliases = verifyMeetingTracks(source,soloRanges,coincident,durations,cancelled);
+            if (cancelled)
+                return {};
+            if (!aliases.isEmpty()) {
+                for (auto &track : tracks)
+                    track.speaker = aliases.value(track.speaker,track.speaker);
+                QMap<int,QList<VoiceRegion>> mergedRanges;
+                for (auto it=soloRanges.cbegin(); it!=soloRanges.cend(); ++it)
+                    mergedRanges[aliases.value(it.key(),it.key())].append(it.value());
+                for (auto &ranges : mergedRanges)
+                    std::sort(ranges.begin(),ranges.end(),[](const VoiceRegion &a, const VoiceRegion &b) {
+                        return a.first < b.first;
+                    });
+                soloRanges = std::move(mergedRanges);
+                speakersInOrder.clear();
+                for (const auto &track : tracks)
+                    if (!speakersInOrder.contains(track.speaker))
+                        speakersInOrder.append(track.speaker);
+            }
+        }
         QMap<int,QVariantMap> identities;
         int embeddings = 0;
         for (const int speaker : speakersInOrder) {
@@ -1038,7 +1065,13 @@ public:
             for (auto other=identities.cbegin(); other!=identities.cend(); ++other)
                 if (meeting || coincident.value(speaker).contains(other.key()))
                     excluded.append(other.value().value("profile_id").toString());
-            const auto sample = soloAudio.value(speaker);
+            QByteArray sample;
+            for (const auto &range : soloRanges.value(speaker)) {
+                const auto bytes = std::min(2*(range.last-range.first),6*2*Rate-int(sample.size()));
+                sample.append(pcm.constData()+2*range.first,bytes);
+                if (sample.size() >= 6*2*Rate)
+                    break;
+            }
             QVariantMap identity;
             if (sample.size() >= Rate*12/10) {
                 QJsonObject created;
@@ -1166,6 +1199,102 @@ public:
     }
 
 private:
+    const SherpaExtractor *openMeetingExtractor(const QString &path)
+    {
+        if (!QFileInfo::exists(path))
+            return nullptr;
+        const auto model = QFile::encodeName(path);
+        const SherpaConfig config{model.constData(),2,0,"cpu"};
+        const auto *extractor = createExtractor_(&config);
+        if (extractor && dimension_(extractor) != Dimension) {
+            destroyExtractor_(extractor);
+            return nullptr;
+        }
+        return extractor;
+    }
+
+    QMap<int,int> verifyMeetingTracks(const QByteArray &pcm, const QMap<int,QList<VoiceRegion>> &solo,
+                                    const QMap<int,QSet<int>> &coincident, const QMap<int,int> &durations,
+                                    const std::atomic_bool &cancelled)
+    {
+        if (!meetingVerifier_)
+            meetingVerifier_ = openMeetingExtractor(root_.filePath(MeetingVerificationModel));
+        if (meetingVerifier_ && !meetingEmbedder_)
+            meetingEmbedder_ = openMeetingExtractor(root_.filePath(DiarizationEmbeddingModel));
+        if (!meetingEmbedder_)
+            return {};
+
+        struct TrackVoice { int id; Embedding verify, cluster; };
+        QList<TrackVoice> voices;
+        for (auto it=solo.cbegin(); it!=solo.cend() && !cancelled; ++it) {
+            auto ranges = it.value();
+            std::sort(ranges.begin(),ranges.end(),[](const VoiceRegion &a, const VoiceRegion &b) {
+                return a.last-a.first > b.last-b.first;
+            });
+            QByteArray sample;
+            for (const auto &range : ranges) {
+                if (range.last-range.first < Rate*4/10)
+                    break;
+                constexpr int trim = Rate/20;
+                const int size = std::min(range.last-range.first-2*trim,5*Rate-int(sample.size()/2));
+                if (size < Rate/4)
+                    break;
+                sample.append(pcm.constData()+2*(range.first+trim),2*size);
+            }
+            TrackVoice voice{it.key(),{},{}};
+            if (sample.size() >= Rate*12/10 &&
+                embed(sample,0,int(sample.size()/2),voice.verify,meetingVerifier_) &&
+                embed(sample,0,int(sample.size()/2),voice.cluster,meetingEmbedder_))
+                voices.append(voice);
+        }
+        const int n = int(voices.size());
+        if (n < 2 || cancelled)
+            return {};
+        // Complete linkage requires every pair in a merged group to agree.
+        // Simultaneous speech makes the corresponding pair ineligible.
+        QVector<float> similarity(qsizetype(n)*n,-1.f);
+        for (int i=0; i<n; ++i) {
+            for (int j=0; j<i; ++j) {
+                const auto &a = voices[i];
+                const auto &b = voices[j];
+                if (coincident.value(a.id).contains(b.id) ||
+                    std::min(durations.value(a.id),durations.value(b.id)) > ShortTrackSamples)
+                    continue;
+                const float verification = std::inner_product(a.verify.begin(),a.verify.end(),b.verify.begin(),0.f);
+                const float clustering = std::inner_product(a.cluster.begin(),a.cluster.end(),b.cluster.begin(),0.f);
+                similarity[i*n+j] = similarity[j*n+i] = (verification+clustering)*.5f;
+            }
+        }
+        QList<QList<int>> groups;
+        for (int i=0; i<n; ++i)
+            groups.append(QList<int>{i});
+        while (!cancelled) {
+            int left = -1, right = -1;
+            float best = TrackMergeSimilarity;
+            for (int i=1; i<groups.size(); ++i) {
+                for (int j=0; j<i; ++j) {
+                    float score = 1.f;
+                    for (const int a : groups[i])
+                        for (const int b : groups[j])
+                            score = std::min(score,similarity[a*n+b]);
+                    if (score >= best) {
+                        best = score;
+                        left = j;
+                        right = i;
+                    }
+                }
+            }
+            if (left < 0)
+                break;
+            groups[left].append(groups.takeAt(right));
+        }
+        QMap<int,int> aliases;
+        for (const auto &group : groups)
+            for (int i=1; i<group.size(); ++i)
+                aliases.insert(voices[group[i]].id,voices[group.first()].id);
+        return aliases;
+    }
+
     const DiarizationResult *diarizeChunk(const QByteArray &pcm, int first, int last)
     {
         QVector<float> signal(last-first);
@@ -1180,9 +1309,11 @@ private:
         return function;
     }
 
-    bool embed(const QByteArray &pcm, int first, int last, Embedding &out)
+    bool embed(const QByteArray &pcm, int first, int last, Embedding &out, const SherpaExtractor *extractor = nullptr)
     {
-        const auto *stream = createStream_(extractor_);
+        if (!extractor)
+            extractor = extractor_;
+        const auto *stream = createStream_(extractor);
         if (!stream)
             return false;
         QVector<float> samples(last-first);
@@ -1190,7 +1321,7 @@ private:
             samples[i] = qFromLittleEndian<qint16>(pcm.constData()+2*(first+i))/32768.0f;
         accept_(stream, Rate, samples.constData(), int(samples.size()));
         inputFinished_(stream);
-        const auto *result = isReady_(extractor_, stream) ? compute_(extractor_, stream) : nullptr;
+        const auto *result = isReady_(extractor, stream) ? compute_(extractor, stream) : nullptr;
         if (result) {
             std::copy_n(result, Dimension, out.begin());
             destroyEmbedding_(result);
@@ -1277,6 +1408,8 @@ private:
     QDir root_;
     QLibrary library_;
     const SherpaExtractor *extractor_ = nullptr;
+    const SherpaExtractor *meetingVerifier_ = nullptr;
+    const SherpaExtractor *meetingEmbedder_ = nullptr;
     const Diarizer *diarizer_ = nullptr;
     const Diarizer *(*createDiarizer_)(const DiarizationConfig *) = nullptr;
     bool preciseDiarizer_ = false;
