@@ -6,11 +6,15 @@
 #include <QDateTime>
 #include <QDir>
 #include <QElapsedTimer>
+#include <QEventLoop>
 #include <QFileInfo>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QLibrary>
 #include <QLockFile>
+#include <QNetworkAccessManager>
+#include <QNetworkProxy>
+#include <QNetworkReply>
 #include <QProcess>
 #include <QRegularExpression>
 #include <QSaveFile>
@@ -18,6 +22,7 @@
 #include <QStandardPaths>
 #include <QTemporaryDir>
 #include <QThread>
+#include <QTimer>
 #include <QUuid>
 #include <QtConcurrentRun>
 #include <QtEndian>
@@ -28,6 +33,8 @@
 #include <array>
 #include <cmath>
 #include <numeric>
+#include <limits>
+#include <optional>
 #include <utility>
 
 namespace {
@@ -50,6 +57,8 @@ constexpr double SmartAdaptMargin = .12;
 constexpr int LiveWindowBytes = 2 * Rate * 24 / 10;
 constexpr int CaptureFrames = Rate * 80 / 1000;
 constexpr int ArrayChannels = 6;
+constexpr int AsrChunkSamples = 24 * Rate;
+constexpr auto AsrName = "Qwen3-ASR-0.6B";
 constexpr int WaveformBins = 640;
 constexpr int LiveRecognitionSeconds = 120;
 constexpr int LiveMeetingSeconds = 900;
@@ -401,6 +410,115 @@ QString timeLabel(qint64 ms)
     return QStringLiteral("%1:%2:%3.%4").arg(ms/3600000,2,10,QLatin1Char('0'))
         .arg(ms/60000%60,2,10,QLatin1Char('0')).arg(ms/1000%60,2,10,QLatin1Char('0'))
         .arg(ms%1000,3,10,QLatin1Char('0'));
+}
+
+class BoardAsr
+{
+public:
+    explicit BoardAsr(const std::atomic_bool &cancelled) : cancelled_(cancelled)
+    {
+        network_.setProxy(QNetworkProxy::NoProxy);
+    }
+
+    QString transcribe(const QByteArray &pcm, int first, int last)
+    {
+        if (cancelled_ || unavailable_)
+            return {};
+        QTemporaryDir directory;
+        if (!directory.isValid())
+            return {};
+        const auto path = directory.filePath("segment.wav");
+        if (!writePcmWav(path,pcm.mid(first*2,(last-first)*2),Rate,1))
+            return {};
+        const QJsonObject job{{"mode","asr"},{"model","qwen3_asr"},{"path",path},{"max_tokens",512},
+                              {"online",false},{"realtime_audio",true}};
+        QElapsedTimer elapsed;
+        elapsed.start();
+        QJsonObject current;
+        int status = 0;
+        do {
+            current = request("/api/jobs",job,3000,&status,false);
+            if (status != 409 || cancelled_)
+                break;
+            QThread::msleep(150);
+        } while (elapsed.elapsed() < 2500);
+        const QString id = current.value("id").toString();
+        static const QRegularExpression jobId(QStringLiteral("^[a-f0-9]{32}$"));
+        if (!jobId.match(id).hasMatch()) {
+            unavailable_ = true;
+            return {};
+        }
+        const auto endpoint = QStringLiteral("/api/jobs/")+id;
+        while (!cancelled_ && elapsed.elapsed() < 12000) {
+            const auto state = current.value("state").toString();
+            if (state == "done")
+                return current.value("text").toString().trimmed();
+            if (state == "error" || state == "cancelled")
+                return {};
+            QThread::msleep(110);
+            current = request(endpoint,{},2000);
+            if (current.isEmpty())
+                break;
+        }
+        request(endpoint+"/cancel",QJsonObject{},1500,nullptr,false);
+        unavailable_ = !cancelled_;
+        return {};
+    }
+
+private:
+    QJsonObject request(const QString &path, const std::optional<QJsonObject> &body, int timeout,
+                        int *status = nullptr, bool interruptible = true)
+    {
+        QNetworkRequest request(QUrl(QStringLiteral("http://127.0.0.1:1828")+path));
+        request.setAttribute(QNetworkRequest::RedirectPolicyAttribute,QNetworkRequest::ManualRedirectPolicy);
+        request.setHeader(QNetworkRequest::ContentTypeHeader,"application/json");
+        request.setTransferTimeout(timeout);
+        QNetworkReply *reply = body ? network_.post(request,QJsonDocument(*body).toJson(QJsonDocument::Compact))
+                                    : network_.get(request);
+        QEventLoop loop;
+        QTimer timer;
+        QElapsedTimer deadline;
+        deadline.start();
+        QObject::connect(&timer,&QTimer::timeout,&loop,[&] {
+            if (deadline.elapsed() >= timeout || (interruptible && cancelled_))
+                reply->abort();
+        });
+        QObject::connect(reply,&QNetworkReply::finished,&loop,&QEventLoop::quit);
+        timer.start(50);
+        if (!reply->isFinished())
+            loop.exec();
+        if (status)
+            *status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+        const auto response = reply->isReadable() ? QJsonDocument::fromJson(reply->readAll()).object() : QJsonObject();
+        delete reply;
+        return response;
+    }
+
+    QNetworkAccessManager network_;
+    const std::atomic_bool &cancelled_;
+    bool unavailable_ = false;
+};
+
+int transcriptBoundary(const QByteArray &pcm, int first, int limit)
+{
+    const int target = first+AsrChunkSamples;
+    if (limit <= target)
+        return limit;
+    constexpr int stride = Rate/50;
+    int best = target;
+    qint64 quietest = std::numeric_limits<qint64>::max();
+    for (int cut = target-Rate; cut <= target; cut += stride) {
+        qint64 power = 0;
+        for (int i=cut-stride/2; i<cut+stride/2; ++i) {
+            const auto sample = qFromLittleEndian<qint16>(pcm.constData()+2*i);
+            power += qint64(sample)*sample;
+        }
+        if (power <= quietest) {
+            quietest = power;
+            best = cut;
+        }
+    }
+    return best;
 }
 
 void setSpan(QVariantMap &row, qint64 start, qint64 end)
@@ -812,7 +930,7 @@ public:
     }
 
     QVariantMap analyzeConversation(const QByteArray &source, qint64 base, QJsonArray profiles, bool allowCreate,
-                                    bool transcribe, const QString &language, const std::atomic_bool &cancelled,
+                                    bool transcribe, const std::atomic_bool &cancelled,
                                     int expectedSpeakers = 0)
     {
         QElapsedTimer elapsed;
@@ -928,6 +1046,7 @@ public:
         }
         const auto transcriptPcm = transcribe && !tracks.isEmpty() && !cancelled
             ? suppressStationaryNoise(pcm) : QByteArray();
+        BoardAsr asr(cancelled);
         for (const auto &track : tracks) {
             if (cancelled)
                 return {};
@@ -942,23 +1061,31 @@ public:
             if (transcribe) {
                 QStringList phrases;
                 QVariantList words;
-                const auto trackLanguage = language.isEmpty() ? row.value("language").toString() : language;
+                bool attempted = false, failed = false;
                 for (const auto &solo : soloRanges.value(track.speaker)) {
-                    const int first = qMax(solo.first,track.first), last = qMin(solo.last,track.last);
-                    if (last-first >= Rate*7/10 && !cancelled) {
-                        const auto value = whisper(transcriptPcm,first,last,trackLanguage,cancelled);
+                    const int limit = qMin(solo.last,track.last);
+                    for (int first = qMax(solo.first,track.first); limit-first >= Rate*7/10 && !cancelled;) {
+                        const int last = transcriptBoundary(transcriptPcm,first,limit);
+                        attempted = true;
+                        const auto value = asr.transcribe(transcriptPcm,first,last);
                         if (!value.isEmpty()) {
                             phrases.append(value);
-                            QVariantMap phrase{{"text",value}};
+                            QVariantMap phrase{{"text",value},{"model",AsrName}};
                             setSpan(phrase,base+qint64(first)*1000/Rate,base+qint64(last)*1000/Rate);
                             words.append(phrase);
-                        }
+                        } else
+                            failed = true;
+                        first = last;
                     }
                 }
                 row["transcript"] = phrases.join(QStringLiteral(" … "));
                 row["transcript_spans"] = words;
-                row["transcript_status"] = overlap ? (phrases.isEmpty() ? "overlap" : "partial")
-                                                    : (phrases.isEmpty() ? "empty" : "completed");
+                row["transcript_model"] = AsrName;
+                if (phrases.isEmpty())
+                    row["transcript_status"] = attempted && failed ? "unavailable" : overlap ? "overlap" : "empty";
+                else
+                    row["transcript_status"] = overlap || failed ? "partial" : "completed";
+                row["transcript_incomplete"] = failed;
             }
             rows.append(row);
         }
@@ -968,7 +1095,7 @@ public:
     }
 
     QVariantMap smartFile(const QString &path, double start, double length, bool transcribe, const QJsonArray &profiles,
-                          bool allowCreate, const QString &language, const std::atomic_bool &cancelled,
+                          bool allowCreate, const std::atomic_bool &cancelled,
                           int expectedSpeakers)
     {
         QElapsedTimer elapsed;
@@ -977,7 +1104,7 @@ public:
         if (pcm.isEmpty())
             return error(QObject::tr("无法解码选定音频。"));
         const auto base = qRound64(start*1000);
-        auto result = analyzeConversation(pcm,base,profiles,allowCreate,transcribe,language,cancelled,expectedSpeakers);
+        auto result = analyzeConversation(pcm,base,profiles,allowCreate,transcribe,cancelled,expectedSpeakers);
         if (cancelled || result.contains("error"))
             return result;
         const int step = qMax(320,int(pcm.size()/2+1799)/1800);
@@ -985,7 +1112,8 @@ public:
         result["waveform"] = waveformEnvelope(pcm);
         result["metrics"] = QVariantMap{{"smart",true},{"total_ms",elapsed.elapsed()},
             {"embeddings",result.value("embeddings")},{"offset_ms",base},{"audio_ms",qint64(pcm.size())*1000/(2*Rate)},
-            {"threshold",SmartMatchThreshold},{"source",QFileInfo(path).fileName()},{"transcription",transcribe},{"asr_language",language},
+            {"threshold",SmartMatchThreshold},{"source",QFileInfo(path).fileName()},{"transcription",transcribe},
+            {"transcript_model",transcribe ? AsrName : ""},
             {"expected_speakers",expectedSpeakers},
             {"overlaps",result.value("overlaps")},{"diarization",result.value("diarization")},{"spectrum_step_ms",step/16.}};
         return result;
@@ -1304,7 +1432,7 @@ bool SpeakerRecognitionService::analyzeFile(const QUrl &source, double start, do
     const auto path = sourcePath(source);
     if (path.isEmpty() || !validRange(start,length,600) || !std::isfinite(threshold) || threshold < .45 || threshold > .99)
         return fail(tr("请选择可读的音频和有效时段。"));
-    if (!storageValid_ || (transcribe && !whisperReady_))
+    if (!storageValid_ || (!smart && transcribe && !whisperReady_))
         return fail(tr("声纹库或 Whisper 模型不可用。"));
     if (!validLanguage(language))
         return fail(tr("转写语言无效。"));
@@ -1321,10 +1449,10 @@ bool SpeakerRecognitionService::analyzeFile(const QUrl &source, double start, do
     owner_ = session_->userId();
     cancelled_ = std::make_shared<std::atomic_bool>(false);
     status_ = tr("正在分析选定音频");
-    watcher_.setFuture(QtConcurrent::run(&pool_, [engine=engine_,path,start,length,threshold,transcribe,smart,language,expectedSpeakers,
+    watcher_.setFuture(QtConcurrent::run(&pool_, [engine=engine_,path,start,length,threshold,transcribe,smart,expectedSpeakers,
                                                 profiles=profiles_,stop=cancelled_] {
         if (smart)
-            return engine->smartFile(path,start,length,transcribe,profiles,true,language,*stop,expectedSpeakers);
+            return engine->smartFile(path,start,length,transcribe,profiles,true,*stop,expectedSpeakers);
         return engine->run(path,start,length,false,threshold,transcribe,profiles,*stop);
     }));
     emit changed();
@@ -1363,7 +1491,7 @@ bool SpeakerRecognitionService::startSmartAnalysisWithTranscript(bool transcribe
         return fail(tr("声纹库无法读取。"));
     if (!validLanguage(language))
         return fail(tr("转写语言无效。"));
-    return startCapture(QStringLiteral("smart"), SmartMatchThreshold, transcribe && whisperReady_, language);
+    return startCapture(QStringLiteral("smart"), SmartMatchThreshold, transcribe);
 }
 
 bool SpeakerRecognitionService::startLiveEnrollment(const QString &id, const QString &name, const QString &language)
@@ -1406,7 +1534,8 @@ bool SpeakerRecognitionService::startCapture(const QString &mode, double thresho
                 {"input_channels",arrayInput ? ArrayChannels : 1},
                 {"live",true},{"operation",mode},{"offset_ms",0},{"audio_ms",0},{"threshold",threshold},
                 {"embeddings",0},{"embedding_ms",0},{"total_ms",0},{"new_profiles",0},{"smart",bool(smartSpeech_)},
-                {"transcription",transcribe},{"asr_language",language},{"spectrum_step_ms",LiveSpectrumStep/16.}};
+                {"transcription",transcribe},{"asr_language",language},{"transcript_model",transcribe ? AsrName : ""},
+                {"spectrum_step_ms",LiveSpectrumStep/16.}};
     const int seconds = mode == "enrollment" ? LiveEnrollmentSeconds : smartSpeech_ ? LiveMeetingSeconds : LiveRecognitionSeconds;
     livePcm_.reserve(qMin(seconds,LiveRecognitionSeconds) * 2 * Rate);
     liveEnvelope_.reserve(qMin(seconds,LiveRecognitionSeconds) * Rate / (CaptureFrames / 2));
@@ -1555,9 +1684,8 @@ void SpeakerRecognitionService::analyzeLiveWindow()
         livePending_ = true;
         liveWatcher_.setFuture(QtConcurrent::run(&pool_, [engine=engine_,pcm,start,profiles=profiles_,
                                                          allowCreate=smartSaveError_.isEmpty(),stop=smartCancel_,
-                                                         language=metrics_.value("asr_language").toString(),
                                                          transcribe=metrics_.value("transcription").toBool()] {
-            return engine->analyzeConversation(pcm,start,profiles,allowCreate,transcribe,language,*stop);
+            return engine->analyzeConversation(pcm,start,profiles,allowCreate,transcribe,*stop);
         }));
         return;
     }

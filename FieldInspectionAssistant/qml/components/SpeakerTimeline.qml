@@ -98,6 +98,7 @@ Rectangle {
         SpeakerTimelineView {
             id: chart
             width: parent.width; height: chartHeight
+            viewportHeight: viewport.height
             samples: timeline.samples
             segments: timeline.segments
             profiles: timeline.profiles
