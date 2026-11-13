@@ -17,36 +17,16 @@ Item {
     readonly property bool microphone: sourceMode.currentIndex === 0
     readonly property var profile: service.profiles.find(row => row.id === profileId) || ({})
     readonly property bool manager: App.session.permissions.settings
-    readonly property var languages: [{id:"",name:"不设语种"}, {id:"zh",name:"中文"},
-        {id:"en",name:"英语"}, {id:"de",name:"德语"}, {id:"fr",name:"法语"},
-        {id:"es",name:"西班牙语"}, {id:"ja",name:"日语"}, {id:"ko",name:"韩语"}, {id:"ru",name:"俄语"}]
-
     function useRecording(path, name) {
         sourceMode.currentIndex = 1
         source = "file://" + path
         sourceLabel = name || path.split("/").pop()
         feedback = ""
     }
-    function selectProfile(entry) {
-        profileId = entry.id || ""
-        nameField.text = entry.name || ""
-        const index = languages.findIndex(lang => lang.id === (entry.language || ""))
-        languageBox.currentIndex = Math.max(0, index)
-    }
     function rangeStart() { return startTime.value }
     function rangeLength() { return duration.value }
-    function enroll(id, name, language) {
-        feedback = ""
-        selectedSegment = -1
-        if (microphone)
-            service.startLiveEnrollment(id, name, language)
-        else
-            service.enroll(source, rangeStart(), Math.min(30, rangeLength()), id, name, language)
-    }
     function leaveMicrophone() {
-        if (service.liveMode === "enrollment")
-            service.cancel()
-        else if (service.liveMode === "recognition")
+        if (service.capturing)
             service.stopLive()
     }
 
@@ -60,7 +40,7 @@ Item {
             pane.sourceLabel = ""
             pane.feedback = ""
             pane.selectedSegment = -1
-            pane.selectProfile({})
+            pane.profileId = ""
         }
     }
 
@@ -87,7 +67,7 @@ Item {
         z: 10
         onAccepted: {
             if (pane.service.removeProfile(pane.profileId))
-                pane.selectProfile({})
+                pane.profileId = ""
         }
     }
 
@@ -105,7 +85,7 @@ Item {
                 width: 132; height: 30
                 model: ["实时麦克风", "音频文件"]
                 enabled: !pane.service.busy
-                Accessible.name: "声纹识别输入"
+                Accessible.name: "智能声纹分析输入"
             }
             TouchButton {
                 text: "打开音频…"; height: 30; autoWidth: true; visible: !pane.microphone
@@ -125,35 +105,23 @@ Item {
                 Label { text: "时长 (s)" }
                 SpinBox { id: duration; from: 1; to: 600; value: 30; editable: true; Layout.preferredWidth: 78 }
             }
-            RowLayout {
-                height: 30
-                Label { text: "阈值" }
-                SpinBox {
-                    id: threshold
-                    from: 45; to: 99; value: 77; editable: true
-                    enabled: !pane.service.busy
-                    Layout.preferredWidth: 83
-                    textFromValue: function(value, locale) { return Number(value/100).toLocaleString(locale, "f", 2) }
-                    valueFromText: function(text, locale) { return Math.round(Number.fromLocaleString(locale, text)*100) }
-                }
-            }
             CheckBox { id: transcribe; height: 30; text: "按档案语种转写"; visible: !pane.microphone; enabled: pane.service.whisperReady && !pane.service.busy }
             TouchButton {
                 objectName: "startLiveSpeakerRecognition"
                 visible: pane.microphone && pane.service.liveMode === ""
-                text: "开始实时识别"; height: 30; autoWidth: true; variant: "primary"
+                text: "开始智能分析"; height: 30; autoWidth: true; variant: "primary"
                 enabled: pane.service.ready && !pane.service.busy
                 onClicked: {
                     pane.feedback = ""
                     pane.selectedSegment = -1
-                    pane.service.startLiveRecognition(threshold.value/100)
+                    pane.service.startSmartAnalysis()
                 }
             }
             TouchButton {
                 objectName: "stopLiveSpeakerCapture"
                 visible: pane.service.liveMode !== ""
                 enabled: pane.service.capturing
-                text: pane.service.liveMode === "enrollment" ? "停止并保存声纹" : "结束识别"
+                text: "结束分析"
                 height: 30; autoWidth: true; variant: "primary"
                 onClicked: pane.service.stopLive()
             }
@@ -164,15 +132,15 @@ Item {
                 onClicked: {
                     pane.feedback = ""
                     pane.selectedSegment = -1
-                    pane.service.analyze(pane.source, pane.rangeStart(), pane.rangeLength(),
-                                         threshold.value/100, transcribe.enabled && transcribe.checked)
+                    pane.service.analyzeSmart(pane.source, pane.rangeStart(), pane.rangeLength(),
+                                              transcribe.enabled && transcribe.checked)
                 }
             }
             TouchButton { text: "加载模型"; height: 30; autoWidth: true; visible: !pane.service.ready && !pane.service.busy; onClicked: pane.service.warmup() }
             TouchButton {
-                text: pane.service.liveMode === "enrollment" ? "取消录入" : "取消任务"
+                text: "取消分析"
                 height: 30; autoWidth: true
-                visible: pane.service.busy && pane.service.liveMode !== "recognition"
+                visible: pane.service.busy && pane.service.liveMode === ""
                 onClicked: pane.service.cancel()
             }
             TouchButton {
@@ -182,13 +150,10 @@ Item {
             }
         }
         Label {
+            visible: !!text
             Layout.fillWidth: true
-            text: [pane.microphone ? "16 kHz · 单声道" : pane.sourceLabel,
-                   pane.feedback || pane.service.status].filter(Boolean).join("　·　")
+            text: pane.feedback || (!pane.microphone && pane.sourceLabel ? pane.sourceLabel : "")
             color: Colors.textSecondary; elide: Text.ElideMiddle
-            ToolTip.text: text
-            ToolTip.visible: statusHover.hovered
-            HoverHandler { id: statusHover }
         }
         ScrollView {
             id: panelScroll
@@ -220,74 +185,31 @@ Item {
                             spreadsheet: true
                             Layout.fillWidth: true; Layout.fillHeight: true
                             items: pane.service.profiles
-                            emptyText: "暂无档案"
-                            columns: [{key:"name",title:"姓名",width:0},{key:"language",title:"语种",width:52},
-                                      {key:"samples",title:"样本",width:50}]
+                            emptyText: "检测到新发言人后自动保存档案"
+                            columns: [{key:"name",title:"发言人",width:0},{key:"samples",title:"样本",width:52}]
                             selectedIndex: items.findIndex(row => row.id === pane.profileId)
-                            onRowClicked: function(index, entry) { pane.selectProfile(entry) }
+                            onRowClicked: function(index, entry) { pane.profileId = entry.id }
                         }
-                        RowLayout {
+                        TouchButton {
                             visible: pane.manager
-                            Layout.fillWidth: true
-                            TextField {
-                                id: nameField
-                                placeholderText: "发言人姓名"; maximumLength: 80
-                                Layout.fillWidth: true; Layout.minimumWidth: 90
-                            }
-                            AppComboBox {
-                                id: languageBox
-                                Layout.preferredWidth: 100
-                                model: pane.languages; textRole: "name"; valueRole: "id"
-                            }
-                        }
-                        Flow {
-                            visible: pane.manager
-                            Layout.fillWidth: true
-                            Layout.preferredHeight: childrenRect.height
-                            spacing: 4
-                            TouchButton {
-                                objectName: "startSpeakerEnrollment"
-                                text: pane.microphone ? "录制新声纹" : "从文件录入"; height: 28; autoWidth: true
-                                enabled: (pane.microphone || !!pane.sourceLabel) && !!nameField.text.trim()
-                                    && pane.service.ready && !pane.service.busy
-                                onClicked: pane.enroll("", nameField.text, languageBox.currentValue)
-                            }
-                            TouchButton {
-                                text: pane.microphone ? "录制追加样本" : "追加文件样本"; height: 28; autoWidth: true
-                                enabled: (pane.microphone || !!pane.sourceLabel) && !!pane.profile.id && pane.profile.samples < 3
-                                    && pane.service.ready && !pane.service.busy
-                                onClicked: pane.enroll(pane.profileId, "", "")
-                            }
-                            TouchButton {
-                                text: "保存档案"; height: 28; autoWidth: true
-                                enabled: !!pane.profile.id && !!nameField.text.trim() && !pane.service.busy
-                                onClicked: pane.service.updateProfile(pane.profileId, nameField.text, languageBox.currentValue)
-                            }
-                            TouchButton {
-                                text: "删除"; height: 28; autoWidth: true
-                                enabled: !!pane.profile.id && !pane.service.busy
-                                onClicked: confirmRemove.openDialog("删除声纹档案", "删除「" + pane.profile.name + "」的全部声纹样本。", "删除", "取消")
-                            }
-                            TouchButton {
-                                text: "清除选择"; height: 28; autoWidth: true
-                                enabled: !!pane.profile.id && !pane.service.busy
-                                onClicked: pane.selectProfile({})
-                            }
+                            text: "删除所选档案"; height: 28; autoWidth: true
+                            enabled: !!pane.profile.id && !pane.service.busy
+                            onClicked: confirmRemove.openDialog("删除声纹档案", "删除「" + pane.profile.name + "」的全部声纹样本。", "删除", "取消")
                         }
                     }
                 }
 
                 GroupBox {
-                    title: "声纹分析"
+                    title: "智能声纹分析"
                     Layout.fillWidth: true; Layout.fillHeight: true
                     Layout.minimumHeight: 135
                     ColumnLayout {
                         anchors.fill: parent
                         spacing: 5
                         Rectangle {
-                            visible: pane.microphone
                             Layout.fillWidth: true
                             Layout.preferredHeight: 56
+                            visible: pane.microphone
                             color: "#f5f7fa"
                             border.color: Colors.border
                             RowLayout {
@@ -298,7 +220,7 @@ Item {
                                     Layout.fillWidth: true
                                     spacing: 1
                                     Label {
-                                        text: "最近识别窗口"
+                                        text: "最近发言人"
                                         color: Colors.textSecondary
                                     }
                                     Label {
@@ -307,17 +229,25 @@ Item {
                                         elide: Text.ElideRight
                                         font.bold: true
                                         font.pixelSize: 17
-                                        text: pane.service.liveMode === "enrollment" ? "正在录入"
-                                            : pane.service.liveMatch.state === "matched" ? pane.service.liveMatch.speaker
-                                            : pane.service.liveMatch.status || (pane.service.capturing ? "等待有效语音" : "—")
-                                        color: pane.service.liveMatch.state === "matched" ? "#005c8d" : Colors.text
+                                        text: {
+                                            const row = pane.service.liveMatch
+                                            if (row.speaker)
+                                                return row.speaker
+                                            if (row.status)
+                                                return row.status
+                                            if (pane.service.busy)
+                                                return pane.service.capturing ? "等待发言" : pane.service.status
+                                            return "—"
+                                        }
+                                        color: pane.service.liveMatch.speaker ? "#005c8d" : Colors.text
                                     }
                                 }
                                 Label {
                                     text: "余弦  " + (pane.service.liveMatch.score || "—")
-                                    visible: pane.service.liveMode !== "enrollment"
+                                    visible: pane.microphone
                                 }
                                 ColumnLayout {
+                                    visible: pane.microphone
                                     Layout.preferredWidth: Math.min(155, parent.width*0.34)
                                     Layout.maximumWidth: 155
                                     spacing: 2
@@ -336,16 +266,19 @@ Item {
                         }
                         Label {
                             Layout.fillWidth: true; elide: Text.ElideRight
-                            text: pane.service.metrics.operation === "enrollment"
-                                ? "采集时长  %1 s".arg((pane.service.metrics.audio_ms/1000).toFixed(1))
-                                : pane.service.metrics.live
-                                ? "%1 s　|　%2 个有效窗口　|　最近计算 %3 ms"
-                                    .arg((pane.service.metrics.audio_ms/1000).toFixed(1)).arg(pane.service.metrics.embeddings)
-                                    .arg(pane.service.liveMatch.inference_ms ?? "—")
-                                : pane.service.metrics.embeddings
-                                ? "%1 个有效窗口　提取 %2 ms　总用时 %3 ms"
-                                    .arg(pane.service.metrics.embeddings).arg(pane.service.metrics.embedding_ms).arg(pane.service.metrics.total_ms)
-                                : "时间戳基于原始录音"
+                            text: {
+                                const info = pane.service.metrics
+                                if (pane.service.operationError)
+                                    return pane.service.operationError
+                                if (!pane.service.ready || (!pane.service.capturing && pane.service.busy))
+                                    return pane.service.status
+                                if (!info.audio_ms)
+                                    return pane.service.status === "分析完成" ? "" : pane.service.status
+                                return "%1 s  ·  %2 个发言片段  ·  新建 %3 个档案"
+                                    .arg((info.audio_ms/1000).toFixed(1)).arg(info.embeddings || 0)
+                                    .arg(info.new_profiles || 0)
+                            }
+                            visible: !!text
                             color: Colors.textSecondary
                         }
                         SpeakerTimeline {
@@ -366,7 +299,9 @@ Item {
                             items: pane.service.segments
                             selectedIndex: pane.selectedSegment
                             onRowClicked: function(index, entry) { pane.selectedSegment = index }
-                            emptyText: pane.microphone ? "开始实时识别后，发言时段会显示在这里。" : "选择音频后运行分析。"
+                            emptyText: pane.service.capturing ? "等待足够的有效语音"
+                                : pane.service.metrics.audio_ms ? "本次未提取到可分析的发言片段"
+                                : "发言片段会显示在这里"
                             columns: [{key:"range",title:"起止时间",width:178},
                                       {key:"speaker",title:"发言人",width:92},{key:"status",title:"状态",width:80},
                                       {key:"score",title:"余弦",width:55},{key:"language",title:"语种",width:45},

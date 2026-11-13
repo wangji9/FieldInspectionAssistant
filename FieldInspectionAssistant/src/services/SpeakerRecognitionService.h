@@ -3,6 +3,7 @@
 #include <QFutureWatcher>
 #include <QJsonArray>
 #include <QPoint>
+#include <QQueue>
 #include <QThreadPool>
 #include <QUrl>
 #include <QVariant>
@@ -12,6 +13,7 @@
 
 class SessionManager;
 class SpeakerRecognitionEngine;
+class SmartSpeech;
 class QThread;
 
 class SpeakerRecognitionService final : public QObject
@@ -21,6 +23,7 @@ class SpeakerRecognitionService final : public QObject
     Q_PROPERTY(bool busy READ busy NOTIFY changed)
     Q_PROPERTY(bool whisperReady READ whisperReady NOTIFY changed)
     Q_PROPERTY(QString status READ status NOTIFY changed)
+    Q_PROPERTY(QString operationError READ operationError NOTIFY changed)
     Q_PROPERTY(QVariantList profiles READ profiles NOTIFY changed)
     Q_PROPERTY(QVariantList segments READ segments NOTIFY changed)
     Q_PROPERTY(QVariantList waveform READ waveform NOTIFY visualsChanged)
@@ -37,6 +40,7 @@ public:
     bool busy() const { return !liveMode_.isEmpty() || watcher_.isRunning() || bool(cancelled_); }
     bool whisperReady() const { return whisperReady_; }
     QString status() const { return status_; }
+    QString operationError() const { return operationError_; }
     QVariantList profiles() const;
     QVariantList segments() const { return segments_; }
     QVariantList waveform() const { return waveform_; }
@@ -55,6 +59,8 @@ public:
     Q_INVOKABLE bool enroll(const QUrl &source, double start, double length, const QString &id,
                             const QString &name, const QString &language);
     Q_INVOKABLE bool analyze(const QUrl &source, double start, double length, double threshold, bool transcribe);
+    Q_INVOKABLE bool analyzeSmart(const QUrl &source, double start, double length, bool transcribe);
+    Q_INVOKABLE bool startSmartAnalysis();
     Q_INVOKABLE bool startLiveRecognition(double threshold);
     Q_INVOKABLE bool startLiveEnrollment(const QString &id, const QString &name, const QString &language);
     Q_INVOKABLE void stopLive();
@@ -69,9 +75,12 @@ signals:
 
 private:
     bool report(const QString &status);
+    bool fail(const QString &message);
     void complete();
     bool prepareEnrollment(const QString &id, const QString &name, const QString &language);
     bool startCapture(const QString &mode, double threshold);
+    bool analyzeFile(const QUrl &source, double start, double length, double threshold, bool transcribe, bool smart);
+    void scanLiveSpeech(bool flush);
     void receiveAudio(const QByteArray &block);
     void captureFinished();
     void analyzeLiveWindow();
@@ -94,6 +103,11 @@ private:
     std::function<bool()> captureGuard_;
     QThread *capture_ = nullptr;
     QString liveMode_, captureError_;
+    QString smartSaveError_;
+    QString operationError_;
+    std::unique_ptr<SmartSpeech> smartSpeech_;
+    struct SpeechWindow { int first, last, voiced; };
+    QQueue<SpeechWindow> speechWindows_;
     QByteArray livePcm_;
     QVector<QPoint> liveEnvelope_;
     QVariantMap liveMatch_;

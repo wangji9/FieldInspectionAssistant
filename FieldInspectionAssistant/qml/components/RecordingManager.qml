@@ -75,7 +75,7 @@ Item {
                         Menu {
                             id:actions
                             MenuItem {
-                                text: "声纹识别"; visible: !root.trash; enabled: modelData.complete && modelData.file_exists
+                                text: "智能声纹分析"; visible: !root.trash; enabled: modelData.complete && modelData.file_exists
                                 onTriggered: root.speakerRequested(modelData.path, modelData.display_name)
                             }
                             MenuItem {text:"详情";onTriggered:root.showRecord(modelData.id,false)}

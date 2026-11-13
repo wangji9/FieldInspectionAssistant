@@ -42,7 +42,7 @@ Rectangle {
                 ToolTip.visible: hoveredRow >= 0
                 ToolTip.text: {
                     const row = timeline.segments[hoveredRow]
-                    return row ? [row.range,row.state==="matched"?row.speaker:row.status,row.score].join("　·　") : ""
+                    return row ? [row.range,row.speaker || row.status,row.score || "—"].join("　·　") : ""
                 }
             }
         }

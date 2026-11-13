@@ -35,6 +35,13 @@ constexpr int HandoffSilence = 100;
 constexpr int Window = Rate * 6;
 constexpr int MinVoicedFrames = 45;
 constexpr int MaxSamples = 3;
+constexpr int MaxProfiles = 250;
+constexpr int SmartMinVoicedFrames = 30;
+constexpr int SmartEnrollVoicedFrames = 40;
+constexpr int SmartPauseFrames = 25;
+constexpr int SmartWindowFrames = 160;
+constexpr double SmartMatchThreshold = .60;
+constexpr double SmartNoveltyThreshold = .45;
 constexpr int LiveWindowBytes = 2 * Rate * 24 / 10;
 constexpr int CaptureFrames = Rate * 80 / 1000;
 constexpr int WaveformBins = 640;
@@ -43,6 +50,7 @@ constexpr int LiveEnrollmentSeconds = 30;
 constexpr float MinimumMargin = 0.05f;
 const auto ModelName = QStringLiteral("3dspeaker_speech_campplus_sv_zh-cn_16k-common.onnx");
 using Embedding = std::array<float, Dimension>;
+struct SmartWindow { int first = 0, last = 0, voiced = 0; };
 
 // Speaker extraction ABI from sherpa-onnx c-api.h v2.0.1 (Apache-2.0).
 // Resolve these symbols at runtime so other application features can start without the model.
@@ -227,6 +235,13 @@ QString timeLabel(qint64 ms)
         .arg(ms%1000,3,10,QLatin1Char('0'));
 }
 
+void setSpan(QVariantMap &row, qint64 start, qint64 end)
+{
+    row["start_ms"] = start;
+    row["end_ms"] = end;
+    row["range"] = timeLabel(start) + " – " + timeLabel(end);
+}
+
 struct Speaker {
     QString id, name, language;
     QList<Embedding> samples;
@@ -254,6 +269,58 @@ QList<Speaker> speakers(const QJsonArray &profiles)
     return result;
 }
 }
+
+class SmartSpeech
+{
+public:
+    SmartSpeech()
+    {
+        if (vad_ && (fvad_set_sample_rate(vad_.get(), Rate) || fvad_set_mode(vad_.get(), 2)))
+            vad_.reset();
+    }
+
+    QList<SmartWindow> scan(const QByteArray &pcm, bool flush, const std::atomic_bool *cancelled = nullptr)
+    {
+        QList<SmartWindow> windows;
+        if (!vad_)
+            return windows;
+        const int totalFrames = int(pcm.size() / (2 * VadFrame));
+        std::array<qint16, VadFrame> samples{};
+        for (; cursor_ < totalFrames && (!cancelled || !*cancelled); ++cursor_) {
+            const auto *raw = pcm.constData() + 2 * cursor_ * VadFrame;
+            qint64 squares = 0;
+            for (int i = 0; i < VadFrame; ++i) {
+                samples[i] = qFromLittleEndian<qint16>(raw + 2*i);
+                squares += qint64(samples[i]) * samples[i];
+            }
+            const bool speech = fvad_process(vad_.get(), samples.data(), samples.size()) > 0
+                && squares > qint64(90)*90*VadFrame;
+            if (speech) {
+                if (voiced_ == 0)
+                    first_ = cursor_;
+                last_ = cursor_ + 1;
+                ++voiced_;
+            }
+            if (voiced_ && (cursor_ + 1 - last_ >= SmartPauseFrames ||
+                           cursor_ + 1 - first_ >= SmartWindowFrames))
+                finish(windows);
+        }
+        if (flush)
+            finish(windows);
+        return windows;
+    }
+
+private:
+    void finish(QList<SmartWindow> &windows)
+    {
+        if (voiced_ >= SmartMinVoicedFrames)
+            windows.append({first_ * VadFrame, last_ * VadFrame, voiced_});
+        voiced_ = 0;
+    }
+
+    std::unique_ptr<Fvad, decltype(&fvad_free)> vad_{fvad_new(), &fvad_free};
+    int cursor_ = 0, first_ = 0, last_ = 0, voiced_ = 0;
+};
 
 class SpeakerRecognitionEngine
 {
@@ -404,6 +471,94 @@ public:
         return compare(speakers(profiles),voice,{},threshold);
     }
 
+    QVariantMap smartWindow(const QByteArray &pcm, const SmartWindow &window, const QJsonArray &profiles,
+                            qint64 base, bool allowCreate, QJsonObject &created)
+    {
+        QElapsedTimer elapsed;
+        elapsed.start();
+        QVariantMap row{{"voiced_ms", window.voiced * 30}};
+        setSpan(row, base + qint64(window.first)*1000/Rate, base + qint64(window.last)*1000/Rate);
+        Embedding voice;
+        if (!embed(pcm, window.first, window.last, voice)) {
+            row["state"] = "insufficient";
+            row["status"] = QObject::tr("特征提取失败");
+        } else {
+            const auto library = speakers(profiles);
+            row = compare(library, voice, row, SmartMatchThreshold);
+            const auto score = row.value("similarity");
+            const bool novel = !score.isValid() || score.toDouble() < SmartNoveltyThreshold;
+            if (row.value("state") != "matched") {
+                if (novel && window.voiced >= SmartEnrollVoicedFrames && allowCreate && profiles.size() < MaxProfiles) {
+                    int number = 0;
+                    for (const auto &entry : profiles)
+                        number = qMax(number, entry.toObject().value("auto_number").toInt());
+                    const auto id = QUuid::createUuid().toString(QUuid::WithoutBraces);
+                    const auto name = QObject::tr("发言人 %1").arg(number + 1, 3, 10, QLatin1Char('0'));
+                    QJsonArray vector;
+                    for (float value : voice)
+                        vector.append(value);
+                    created = {{"id",id},{"name",name},{"language",QString()},{"auto_number",number+1},
+                               {"samples",QJsonArray{vector}}};
+                    row["state"] = "new";
+                    row["status"] = QObject::tr("已自动建档");
+                    row["speaker"] = name;
+                    row["profile_id"] = id;
+                } else if (!novel) {
+                    row["status"] = QObject::tr("待确认");
+                } else if (!allowCreate) {
+                    row["status"] = QObject::tr("未知发言人");
+                } else if (profiles.size() >= MaxProfiles) {
+                    row["status"] = QObject::tr("档案已满");
+                } else {
+                    row["status"] = QObject::tr("建档语音偏短");
+                }
+            }
+        }
+        row["inference_ms"] = elapsed.elapsed();
+        return row;
+    }
+
+    QVariantMap smartFile(const QString &path, double start, double length, bool transcribe, QJsonArray profiles,
+                          bool allowCreate, const std::atomic_bool &cancelled)
+    {
+        QElapsedTimer elapsed;
+        elapsed.start();
+        const auto pcm = decode(path, start, length, cancelled);
+        if (pcm.isEmpty())
+            return error(QObject::tr("无法解码选定音频。"));
+        SmartSpeech speech;
+        const auto windows = speech.scan(pcm, true, &cancelled);
+        QVariantList rows;
+        QJsonArray additions;
+        qint64 embeddingMs = 0;
+        int embeddings = 0;
+        const auto base = qRound64(start*1000);
+        for (const auto &window : windows) {
+            if (cancelled)
+                return {};
+            QJsonObject created;
+            auto row = smartWindow(pcm, window, profiles, base, allowCreate, created);
+            if (!created.isEmpty()) {
+                additions.append(created);
+                profiles.append(created);
+            }
+            if (row.value("state") != "insufficient") {
+                ++embeddings;
+                embeddingMs += row.value("inference_ms").toLongLong();
+            }
+            if (transcribe && row.value("state") == "matched" && !row.value("language").toString().isEmpty()) {
+                const auto value = whisper(pcm, window.first, window.last, row.value("language").toString(), cancelled);
+                row["transcript"] = value;
+                row["transcript_status"] = value.isEmpty() ? "empty" : "completed";
+            }
+            rows.append(row);
+        }
+        return {{"segments",rows},{"waveform",waveformEnvelope(pcm)},{"additions",additions},
+                {"metrics",QVariantMap{{"smart",true},{"total_ms",elapsed.elapsed()},{"embedding_ms",embeddingMs},
+                {"embeddings",embeddings},{"offset_ms",base},{"audio_ms",qint64(pcm.size())*1000/(2*Rate)},
+                {"threshold",SmartMatchThreshold},{"source",QFileInfo(path).fileName()},{"transcription",transcribe}}}};
+    }
+
 private:
     template<typename Function>
     bool resolve(Function &function, const char *symbol) {
@@ -545,6 +700,7 @@ SpeakerRecognitionService::SpeakerRecognitionService(SessionManager *session, QO
         waveform_.clear();
         metrics_.clear();
         liveMatch_.clear();
+        operationError_.clear();
         emit visualsChanged();
         emit changed();
     });
@@ -586,6 +742,7 @@ void SpeakerRecognitionService::warmup()
         return;
     cancelled_ = std::make_shared<std::atomic_bool>(false);
     owner_ = session_->userId();
+    operationError_.clear();
     status_ = tr("正在初始化 sherpa-onnx / CAM++");
     watcher_.setFuture(QtConcurrent::run(&pool_, [engine=engine_] { return engine->load(); }));
     emit changed();
@@ -609,6 +766,12 @@ bool SpeakerRecognitionService::report(const QString &status)
     status_ = status;
     emit changed();
     return false;
+}
+
+bool SpeakerRecognitionService::fail(const QString &message)
+{
+    operationError_ = message;
+    return report(message);
 }
 
 int SpeakerRecognitionService::profileIndex(const QString &id) const
@@ -642,7 +805,7 @@ bool SpeakerRecognitionService::enroll(const QUrl &source, double start, double 
 bool SpeakerRecognitionService::prepareEnrollment(const QString &id, const QString &name, const QString &language)
 {
     const auto index = profileIndex(id);
-    if ((!id.isEmpty() && index < 0) || (index < 0 && profiles_.size() >= 250) ||
+    if ((!id.isEmpty() && index < 0) || (index < 0 && profiles_.size() >= MaxProfiles) ||
         (index >= 0 && profiles_[index].toObject().value("samples").toArray().size() >= MaxSamples) ||
         (index < 0 && !validProfile(name,language)))
         return report(tr("请检查档案名称、语种和样本数。每人最多 3 组样本。"));
@@ -656,13 +819,25 @@ bool SpeakerRecognitionService::prepareEnrollment(const QString &id, const QStri
 
 bool SpeakerRecognitionService::analyze(const QUrl &source, double start, double length, double threshold, bool transcribe)
 {
+    return analyzeFile(source, start, length, threshold, transcribe, false);
+}
+
+bool SpeakerRecognitionService::analyzeSmart(const QUrl &source, double start, double length, bool transcribe)
+{
+    return analyzeFile(source, start, length, SmartMatchThreshold, transcribe, true);
+}
+
+bool SpeakerRecognitionService::analyzeFile(const QUrl &source, double start, double length, double threshold,
+                                          bool transcribe, bool smart)
+{
     if (busy() || !ready_ || !session_->can("inspect"))
         return false;
     const auto path = sourcePath(source);
     if (path.isEmpty() || !validRange(start,length,600) || !std::isfinite(threshold) || threshold < .45 || threshold > .99)
-        return report(tr("请选择音频、有效时段和 0.45–0.99 的余弦阈值。"));
+        return fail(tr("请选择可读的音频和有效时段。"));
     if (!storageValid_ || (transcribe && !whisperReady_))
-        return report(tr("声纹库或 Whisper 模型不可用。"));
+        return fail(tr("声纹库或 Whisper 模型不可用。"));
+    operationError_.clear();
     segments_.clear();
     waveform_.clear();
     metrics_.clear();
@@ -671,8 +846,10 @@ bool SpeakerRecognitionService::analyze(const QUrl &source, double start, double
     owner_ = session_->userId();
     cancelled_ = std::make_shared<std::atomic_bool>(false);
     status_ = tr("正在分析选定音频");
-    watcher_.setFuture(QtConcurrent::run(&pool_, [engine=engine_,path,start,length,threshold,transcribe,
+    watcher_.setFuture(QtConcurrent::run(&pool_, [engine=engine_,path,start,length,threshold,transcribe,smart,
                                                 profiles=profiles_,stop=cancelled_] {
+        if (smart)
+            return engine->smartFile(path,start,length,transcribe,profiles,true,*stop);
         return engine->run(path,start,length,false,threshold,transcribe,profiles,*stop);
     }));
     emit changed();
@@ -693,6 +870,15 @@ bool SpeakerRecognitionService::startLiveRecognition(double threshold)
     return startCapture(QStringLiteral("recognition"), threshold);
 }
 
+bool SpeakerRecognitionService::startSmartAnalysis()
+{
+    if (busy() || !ready_ || !session_->can("inspect"))
+        return false;
+    if (!storageValid_)
+        return fail(tr("声纹库无法读取。"));
+    return startCapture(QStringLiteral("smart"), SmartMatchThreshold);
+}
+
 bool SpeakerRecognitionService::startLiveEnrollment(const QString &id, const QString &name, const QString &language)
 {
     if (busy() || !ready_ || !session_->can("settings") || !prepareEnrollment(id, name, language))
@@ -706,12 +892,16 @@ bool SpeakerRecognitionService::startLiveEnrollment(const QString &id, const QSt
 bool SpeakerRecognitionService::startCapture(const QString &mode, double threshold)
 {
     if (captureGuard_ && captureGuard_())
-        return report(tr("音频设备正在使用，请结束当前采集后再试。"));
+        return fail(tr("音频设备正在使用，请结束当前采集后再试。"));
+    operationError_.clear();
     owner_ = session_->userId();
     liveMode_ = mode;
     captureStopping_ = false;
     discardCapture_ = false;
     captureError_.clear();
+    smartSaveError_.clear();
+    speechWindows_.clear();
+    smartSpeech_ = mode == "smart" ? std::make_unique<SmartSpeech>() : nullptr;
     liveCursor_ = 0;
     liveMatch_.clear();
     segments_.clear();
@@ -720,7 +910,7 @@ bool SpeakerRecognitionService::startCapture(const QString &mode, double thresho
     livePcm_.clear();
     inputLevel_ = -90.;
     metrics_ = {{"source",tr("实时麦克风")},{"live",true},{"operation",mode},{"offset_ms",0},{"audio_ms",0},{"threshold",threshold},
-                {"embeddings",0},{"embedding_ms",0},{"total_ms",0}};
+                {"embeddings",0},{"embedding_ms",0},{"total_ms",0},{"new_profiles",0},{"smart",bool(smartSpeech_)}};
     const int seconds = mode == "enrollment" ? LiveEnrollmentSeconds : LiveRecognitionSeconds;
     livePcm_.reserve(seconds * 2 * Rate);
     liveEnvelope_.reserve(seconds * Rate / (CaptureFrames / 2));
@@ -776,11 +966,23 @@ void SpeakerRecognitionService::receiveAudio(const QByteArray &block)
     emit visualsChanged();
     if (first) {
         status_ = liveMode_ == "enrollment" ? tr("正在录入，请连续清晰地说 5–10 秒")
+                  : smartSpeech_ ? tr("正在采集，等待发言")
                   : profiles_.isEmpty() ? tr("正在识别，声纹库暂无档案") : tr("正在识别麦克风语音");
         emit changed();
     }
-    if (liveMode_ == "recognition")
+    if (smartSpeech_)
+        scanLiveSpeech(false);
+    if (liveMode_ != "enrollment")
         analyzeLiveWindow();
+}
+
+void SpeakerRecognitionService::scanLiveSpeech(bool flush)
+{
+    if (!discardCapture_) {
+        const auto windows = smartSpeech_->scan(livePcm_, flush);
+        for (const auto &window : windows)
+            speechWindows_.enqueue({window.first,window.last,window.voiced});
+    }
 }
 
 void SpeakerRecognitionService::stopLive()
@@ -798,7 +1000,9 @@ void SpeakerRecognitionService::captureFinished()
     captureStopping_ = false;
     inputLevel_ = -90.;
     emit visualsChanged();
-    if (liveMode_ == "recognition") {
+    if (liveMode_ != "enrollment") {
+        if (smartSpeech_)
+            scanLiveSpeech(true);
         emit changed();
         analyzeLiveWindow();
         return;
@@ -824,7 +1028,23 @@ void SpeakerRecognitionService::analyzeLiveWindow()
     if (livePending_)
         return;
     const int remaining = int(livePcm_.size()) - liveCursor_;
-    if (!discardCapture_ && (remaining >= LiveWindowBytes ||
+    if (smartSpeech_ && !discardCapture_ && !speechWindows_.isEmpty()) {
+        const auto window = speechWindows_.dequeue();
+        const auto pcm = livePcm_.mid(window.first*2, (window.last-window.first)*2);
+        const qint64 start = qint64(window.first)*1000/Rate;
+        livePending_ = true;
+        liveWatcher_.setFuture(QtConcurrent::run(&pool_, [engine=engine_,pcm,start,window,profiles=profiles_,
+                                                         allowCreate=smartSaveError_.isEmpty()] {
+            QJsonObject created;
+            auto row = engine->smartWindow(pcm, {0,window.last-window.first,window.voiced},
+                                           profiles, start, allowCreate, created);
+            if (!created.isEmpty())
+                row["_new_profile"] = created;
+            return row;
+        }));
+        return;
+    }
+    if (!smartSpeech_ && !discardCapture_ && (remaining >= LiveWindowBytes ||
                             (!capture_ && remaining >= 2 * VadFrame * MinVoicedFrames))) {
         const int length = qMin(remaining, LiveWindowBytes);
         const auto pcm = livePcm_.mid(liveCursor_, length);
@@ -837,22 +1057,27 @@ void SpeakerRecognitionService::analyzeLiveWindow()
             QElapsedTimer elapsed;
             elapsed.start();
             auto row = engine->classify(pcm, threshold, profiles);
-            row["start_ms"] = start;
-            row["end_ms"] = end;
-            row["range"] = timeLabel(start) + " – " + timeLabel(end);
+            setSpan(row, start, end);
             row["inference_ms"] = elapsed.elapsed();
             return row;
         }));
         return;
     }
     if (!capture_) {
+        const bool smart = bool(smartSpeech_);
         liveMode_.clear();
         livePcm_.clear();
         liveEnvelope_.clear();
+        smartSpeech_.reset();
+        speechWindows_.clear();
         if (discardCapture_)
             report(tr("识别已停止"));
         else if (!captureError_.isEmpty())
-            report(captureError_);
+            fail(captureError_);
+        else if (!smartSaveError_.isEmpty())
+            fail(smartSaveError_);
+        else if (smart)
+            report(tr("分析完成"));
         else if (metrics_.value("embeddings").toInt() == 0)
             report(tr("采集结束，未检测到足够的有效语音"));
         else
@@ -864,7 +1089,21 @@ void SpeakerRecognitionService::completeLiveWindow()
 {
     livePending_ = false;
     if (!discardCapture_ && owner_ == session_->userId() && session_->can("inspect")) {
-        const auto row = liveWatcher_.result();
+        auto row = liveWatcher_.result();
+        const auto created = row.take("_new_profile").toJsonObject();
+        if (!created.isEmpty()) {
+            auto candidate = profiles_;
+            candidate.append(created);
+            if (saveProfiles(candidate)) {
+                metrics_["new_profiles"] = metrics_.value("new_profiles").toInt() + 1;
+            } else {
+                smartSaveError_ = status_;
+                row["state"] = "unknown";
+                row["status"] = tr("建档未保存");
+                row.remove("profile_id");
+                row.remove("speaker");
+            }
+        }
         segments_.append(row);
         liveMatch_ = row;
         const auto elapsed = row.value("inference_ms").toLongLong();
@@ -890,7 +1129,7 @@ void SpeakerRecognitionService::complete()
         return;
     }
     if (result.contains("error")) {
-        report(result.value("error").toString());
+        fail(result.value("error").toString());
         return;
     }
     if (result.value("loaded").toBool()) {
@@ -916,8 +1155,23 @@ void SpeakerRecognitionService::complete()
         segments_ = result.value("segments").toList();
         waveform_ = result.value("waveform").toList();
         metrics_ = result.value("metrics").toMap();
+        const auto additions = result.value("additions").toJsonArray();
+        if (!additions.isEmpty()) {
+            auto candidate = profiles_;
+            for (const auto &entry : additions)
+                candidate.append(entry);
+            if (!session_->can("inspect") || !saveProfiles(candidate)) {
+                segments_.clear();
+                metrics_["embeddings"] = 0;
+                emit visualsChanged();
+                emit changed();
+                return;
+            }
+            metrics_["new_profiles"] = additions.size();
+        }
         emit visualsChanged();
-        status_ = segments_.isEmpty() ? tr("未检测到有效语音")
+        status_ = metrics_.value("smart").toBool() ? tr("分析完成")
+                  : segments_.isEmpty() ? tr("未检测到有效语音")
                                      : tr("完成 %1 个时段的识别").arg(segments_.size());
     }
     emit changed();
@@ -931,7 +1185,8 @@ QVariantList SpeakerRecognitionService::profiles() const
     for (const auto &value : profiles_) {
         const auto entry = value.toObject();
         result.append(QVariantMap{{"id",entry.value("id").toString()},{"name",entry.value("name").toString()},
-            {"language",entry.value("language").toString()},{"samples",entry.value("samples").toArray().size()}});
+            {"language",entry.value("language").toString()},{"samples",entry.value("samples").toArray().size()},
+            {"automatic",entry.contains("auto_number")}});
     }
     return result;
 }
@@ -958,20 +1213,20 @@ void SpeakerRecognitionService::readProfiles()
 bool SpeakerRecognitionService::saveProfiles(const QJsonArray &candidate)
 {
     if (!storageValid_ || !QDir().mkpath(QFileInfo(libraryPath_).absolutePath()))
-        return report(tr("声纹库目录不可写。"));
+        return fail(tr("声纹库目录不可写。"));
     QLockFile lock(libraryPath_ + ".lock");
     if (!lock.tryLock())
-        return report(tr("声纹库正在保存，请稍后重试。"));
+        return fail(tr("声纹库正在保存，请稍后重试。"));
     const auto previous = profiles_;
     readProfiles();
     if (!storageValid_ || previous != profiles_)
-        return report(tr("声纹库已更新，请重新选择档案。"));
+        return fail(tr("声纹库已更新，请重新开始分析。"));
     QSaveFile file(libraryPath_);
     const auto json = QJsonDocument(QJsonObject{{"schema",1},{"model",ModelName},{"dimension",Dimension},
                                                {"profiles",candidate}}).toJson(QJsonDocument::Compact);
     if (!file.open(QIODevice::WriteOnly) || !file.setPermissions(QFileDevice::ReadOwner|QFileDevice::WriteOwner) ||
         file.write(json) != json.size() || !file.commit())
-        return report(tr("声纹库保存失败。"));
+        return fail(tr("声纹库保存失败。"));
     profiles_ = candidate;
     return true;
 }
@@ -1002,6 +1257,7 @@ bool SpeakerRecognitionService::removeProfile(const QString &id)
     candidate.removeAt(index);
     if (!saveProfiles(candidate))
         return false;
+    operationError_.clear();
     status_ = tr("已删除档案");
     emit changed();
     return true;

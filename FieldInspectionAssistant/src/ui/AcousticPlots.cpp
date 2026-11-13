@@ -86,7 +86,7 @@ void SpeakerTimelineItem::rebuildLanes()
         const auto key=rowKey(row);
         if (std::any_of(lanes_.cbegin(),lanes_.cend(),[&](const Lane &lane){return lane.key==key;}))
             continue;
-        if (row.value("state")=="matched") {
+        if (!row.value("profile_id").toString().isEmpty()) {
             const auto it=std::find_if(profiles_.cbegin(),profiles_.cend(),[&](const QVariant &profile) {
                 return profile.toMap().value("id")==key;
             });

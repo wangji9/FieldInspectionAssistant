@@ -152,7 +152,7 @@ Rectangle {
             objectName:"analysisMainNavigation";Layout.fillWidth:true;Layout.preferredHeight:root.tab===6?28:36
         Flickable {anchors.left:parent.left;anchors.right:parent.right;anchors.rightMargin:root.tab<5?68:0;height:parent.height;contentWidth:navigationRow.width;clip:true;boundsBehavior:Flickable.StopAtBounds
             Row {id:navigationRow;height:parent.height;spacing:4
-                Repeater {model:["采集通道","信号分析","趋势","声学评估","录音管理","声纹识别","声学成像"]
+                Repeater {model:["采集通道","信号分析","趋势","声学评估","录音管理","智能声纹分析","声学成像"]
                     TouchButton{objectName:"analysisTab"+index;text:modelData;autoWidth:true;height:28;variant:root.tab===index?"tonal":"secondary";onClicked:root.tab=index}
                 }
                 TouchButton{objectName:"startSensorCapture";visible:root.tab!==6&&(root.tab!==5||App.analysis.running);text:App.analysis.running?"停止并保存":"开始采集";autoWidth:true;height:28;variant:App.analysis.running?"danger":"primary";enabled:App.analysis.running||(!App.evaluation.busy&&root.selectedSource.length>0);onClicked:root.toggleCapture()}
