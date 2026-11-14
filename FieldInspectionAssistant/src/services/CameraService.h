@@ -66,6 +66,7 @@ signals:
     void frameMetadataChanged();
     void opened();void closed();void error(const QString &message);
     void settingsChanged();void stateChanged();void metricsChanged();void recordingChanged();void mediaSaved();void statusChanged();
+    void captureSaved(const QString &kind, const QString &path, qint64 capturedMs, qint64 durationMs);
 private:
     bool authorized();
     bool openCapture(const QString &path, bool nativePreview);
@@ -73,7 +74,7 @@ private:
     void setStatus(const QString &message);
     QString newMediaPath(const QString &extension)const;
     void refreshPreview();void captureFinished();void recorderFinished();
-    void photoSaved(const QString &path,bool ok);
+    void photoSaved(const QString &path,bool ok,qint64 capturedMs);
     NativeCameraCapture *capture_=nullptr;NativeCameraRecorder *recorder_=nullptr;
     std::shared_ptr<CameraFrameStore> store_;
     QTimer previewTimer_;QElapsedTimer statsClock_,recordClock_;

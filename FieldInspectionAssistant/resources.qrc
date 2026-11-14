@@ -27,6 +27,7 @@
     <file>qml/components/DesktopTab.qml</file>
     <file>qml/components/WorkbenchMenuBar.qml</file>
     <file>qml/components/ProjectOverview.qml</file>
+    <file>qml/components/ProjectInspectionWorkbench.qml</file>
     <file>qml/components/ProjectResources.qml</file>
     <file>qml/components/VisionAlgorithmPane.qml</file>
     <file>qml/components/VisionLivePane.qml</file>

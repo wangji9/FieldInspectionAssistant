@@ -41,7 +41,12 @@ qint64 captureTimestamp(const v4l2_buffer &buffer, qint64 epochOffset)
     return received;
 }
 }
-QByteArray cameraJpeg(const std::shared_ptr<CameraFrameStore>&store){if(!store)return {};QMutexLocker lock(&store->mutex);return store->jpeg;}
+QByteArray cameraJpeg(const std::shared_ptr<CameraFrameStore>&store,qint64 *capturedMs){
+    if(!store)return {};
+    QMutexLocker lock(&store->mutex);
+    if(capturedMs)*capturedMs=store->jpegCapturedMs;
+    return store->jpeg;
+}
 bool saveCameraPhoto(const QByteArray&jpeg,const QString&path,const QByteArray&format,int quality,int rotation,bool mirrored){
     auto image=QImage::fromData(jpeg,"JPG");if(image.isNull())return false;image=transformed(image,rotation,mirrored);
     if(!QDir().mkpath(QFileInfo(path).absolutePath()))return false;QSaveFile file(path);
@@ -195,6 +200,7 @@ void NativeCameraCapture::run(){
         if (jpeg.isEmpty())
             continue;
         store_->jpeg = jpeg;
+        store_->jpegCapturedMs = timestamp;
         store_->captured += drained;
         store_->stale += drained - 1 + !pendingJpeg.isEmpty();
         pendingJpeg = std::move(jpeg);
@@ -215,7 +221,7 @@ NativeCameraRecorder::NativeCameraRecorder(std::shared_ptr<CameraFrameStore>stor
 NativeCameraRecorder::~NativeCameraRecorder(){requestInterruption();wait();}
 QVariantMap NativeCameraRecorder::result()const{QMutexLocker lock(&mutex_);return result_;}
 void NativeCameraRecorder::run(){
-    QString temp=target_+".partial.mp4",error;int written=0;QProcess encoder;
+    QString temp=target_+".partial.mp4",error;int written=0;qint64 firstFrameMs=0;QProcess encoder;
     QStringList args{"-hide_banner","-loglevel","error","-nostdin","-n","-threads","2","-f","image2pipe","-vcodec","mjpeg","-framerate",QString::number(fps_),"-i","pipe:0","-an"};
     QStringList filters;if(mirrored_)filters<<"hflip";if(rotation_==90)filters<<"transpose=clock";else if(rotation_==180)filters<<"hflip"<<"vflip";else if(rotation_==270)filters<<"transpose=cclock";
     if(!filters.isEmpty())args<<"-vf"<<filters.join(',');args<<"-c:v"<<"mpeg4"<<"-threads"<<"2"<<"-q:v"<<QString::number(quality_)<<"-pix_fmt"<<"yuv420p"<<"-movflags"<<"+faststart"<<temp;
@@ -223,7 +229,7 @@ void NativeCameraRecorder::run(){
     QElapsedTimer clock,storage;clock.start();storage.start();
     while(!isInterruptionRequested()&&clock.elapsed()<seconds_*1000){
         if(encoder.state()!=QProcess::Running){error=QString::fromUtf8(encoder.readAllStandardError()).right(1000);break;}
-        auto jpeg=cameraJpeg(store_);if(jpeg.isEmpty()){msleep(10);continue;}
+        auto jpeg=cameraJpeg(store_,written ? nullptr : &firstFrameMs);if(jpeg.isEmpty()){msleep(10);continue;}
         if(encoder.write(jpeg)<0){error="写入录像编码器失败";break;}
         QElapsedTimer drain;drain.start();while(encoder.bytesToWrite()>0){if(!encoder.waitForBytesWritten(200)&&encoder.state()!=QProcess::Running)break;if(drain.elapsed()>1500){error="编码速度不足，已停止并保存当前录像";break;}}
         if(!error.isEmpty())break;written++;
@@ -234,5 +240,6 @@ void NativeCameraRecorder::run(){
     encoder.closeWriteChannel();if(!encoder.waitForFinished(15000)){encoder.kill();encoder.waitForFinished(2000);error="录像编码保存超时";}
     bool ok=encoder.exitStatus()==QProcess::NormalExit&&encoder.exitCode()==0&&written>0&&QFileInfo(temp).size()>128&&QFile::rename(temp,target_);
     if(!ok){if(error.isEmpty())error=QString::fromUtf8(encoder.readAllStandardError()).right(1000);QFile::remove(temp);}
-    QMutexLocker lock(&mutex_);result_={{"ok",ok},{"error",error},{"path",target_},{"frames",written},{"duration",double(written)/fps_},{"fps",fps_}};
+    QMutexLocker lock(&mutex_);result_={{"ok",ok},{"error",error},{"path",target_},{"frames",written},
+        {"duration",double(written)/fps_},{"fps",fps_},{"captured_ms",firstFrameMs}};
 }

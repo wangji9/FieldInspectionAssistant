@@ -53,6 +53,11 @@ public:
     Q_INVOKABLE QVariantMap evidenceGraph(const QString &device, const QString &eventId = {}) const;
     Q_INVOKABLE QVariantList eventTimeline(const QString &eventId) const;
     Q_INVOKABLE QVariantMap fuse(const QString &anchorId);
+    Q_INVOKABLE QVariantMap fuseSelected(const QString &anchorId, const QStringList &kinds, int toleranceMs);
+    Q_INVOKABLE QVariantMap fusionInfo(const QString &eventId) const;
+    Q_INVOKABLE QVariantMap importLiveCapture(const QString &path, const QString &device, const QString &point,
+                                             const QString &kind, qint64 capturedMs, qint64 durationMs,
+                                             const QString &recordId);
     Q_INVOKABLE QVariantMap evidenceFile(const QString &evidenceId) const;
     Q_INVOKABLE bool playEvidenceVideo(const QString &evidenceId) const;
     QVariantList eventMedia(const QString &eventId) const;
@@ -78,6 +83,10 @@ signals:
     void changed();
 
 private:
+    QVariantMap storeEvidence(const QUrl &file, const QString &device, const QString &point, const QString &kind,
+                              qint64 capturedMs, const QString &clock, qint64 durationMs, const QString &recordId);
+    QVariantMap storeFusion(const QString &anchorId, const QString &point, const QString &recordId,
+                            const QStringList &ids, const QVariantMap &alignment = {});
     QVariantMap writeProjectCopy(const QSqlDatabase &sourceDb, const QVariantMap &sourceProject,
                                  const QUrl &folder, const QString &name, const QString &description,
                                  bool archive) const;

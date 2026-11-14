@@ -119,7 +119,7 @@ NativeAudioCapture::NativeAudioCapture(const QVariantMap&device,const QString&fo
     }
 }
 NativeAudioCapture::~NativeAudioCapture(){requestInterruption();wait(3000);}
-QVariantMap NativeAudioCapture::info()const{QMutexLocker lock(&mutex_);return {{"id",id_},{"path",path_},{"source",device_["name"]},{"fs",rate_},{"channels",channels_},{"started",started_},{"duration",double(frames_.load())/rate_},{"frames",QVariant::fromValue(frames_.load())},{"has_signal",hasSignal_.load()},{"finalized",finalized_.load()},{"xruns",QVariant::fromValue(xruns_.load())},{"packets",QVariant::fromValue(packets_.load())},{"checksum_errors",QVariant::fromValue(checksumErrors_.load())},{"transport",device_.value("transport","alsa")},{"error",error_},{"origin","sensor"}};}
+QVariantMap NativeAudioCapture::info()const{QMutexLocker lock(&mutex_);return {{"id",id_},{"path",path_},{"source",device_["name"]},{"fs",rate_},{"channels",channels_},{"started",started_},{"captured_ms",firstSampleMs_},{"duration",double(frames_.load())/rate_},{"frames",QVariant::fromValue(frames_.load())},{"has_signal",hasSignal_.load()},{"finalized",finalized_.load()},{"xruns",QVariant::fromValue(xruns_.load())},{"packets",QVariant::fromValue(packets_.load())},{"checksum_errors",QVariant::fromValue(checksumErrors_.load())},{"transport",device_.value("transport","alsa")},{"error",error_},{"origin","sensor"}};}
 QByteArray NativeAudioCapture::latestPcm(double seconds, quint64 *endFrame, qint64 *receivedMs)const{
     QMutexLocker lock(&mutex_);
     if(endFrame)*endFrame=frames_.load();
@@ -173,7 +173,10 @@ bool NativeAudioCapture::appendPcm(QFile&file,const char *data,int bytes){
     if(!hasSignal_ && std::any_of(data,data+bytes,[](char value){return value!=0;}))hasSignal_=true;
     {QMutexLocker lock(&mutex_);quint64 first=qMin(quint64(samples),quint64(ring_.size())-write_);std::memcpy(ring_.data()+write_,data,first*2);if(first<quint64(samples))std::memcpy(ring_.data(),data+first*2,(samples-first)*2);write_=(write_+samples)%ring_.size();available_=qMin(quint64(ring_.size()),available_+samples);
         frames_+=bytes/(channels_*2);
-        receivedMs_=QDateTime::currentMSecsSinceEpoch();}
+        receivedMs_=QDateTime::currentMSecsSinceEpoch();
+        if (!firstSampleMs_)
+            firstSampleMs_=receivedMs_-qint64(bytes)*1000/(2*channels_*rate_);
+    }
     sequence_++;return true;
 }
 void NativeAudioCapture::runSerial(){

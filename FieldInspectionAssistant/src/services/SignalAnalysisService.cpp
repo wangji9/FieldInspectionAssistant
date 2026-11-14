@@ -127,9 +127,12 @@ void SignalAnalysisService::finishNative(){
         message_=!indexed ? QStringLiteral("录音没有有效帧，或索引未能保存")
             : !info.value("has_signal").toBool() ? QStringLiteral("已保存 WAV，采样值全部为零")
             : QStringLiteral("录音已保存");
-    reloadRecordings();
-    if (indexed && info.value("has_signal").toBool() && info.value("error").toString().isEmpty())
+    if (indexed && info.value("has_signal").toBool() && info.value("error").toString().isEmpty()) {
         emit saved(info.value("path").toString());
+        emit captureSaved(info.value("path").toString(),info.value("captured_ms").toLongLong(),
+                          qRound64(info.value("duration").toDouble()*1000));
+    }
+    reloadRecordings();
     emit changed();
 }
 void SignalAnalysisService::importFile(const QString &path){

@@ -118,12 +118,21 @@ Flickable {
                 id: commandBar
                 anchors { left: parent.left; right: parent.right; top: parent.top; margins: 5 }
                 spacing: 4
-                Label {
+                RowLayout {
                     Layout.fillWidth: true
-                    text: overview.hasProject ? overview.workspace.project.name : "未打开工程"
-                    font.pixelSize: 15
-                    font.bold: true
-                    elide: Text.ElideRight
+                    Label {
+                        Layout.fillWidth: true
+                        text: overview.hasProject ? overview.workspace.project.name : "未打开工程"
+                        font.pixelSize: 15
+                        font.bold: true
+                        elide: Text.ElideRight
+                    }
+                    Button {
+                        objectName: "openProjectInspectionWorkbench"
+                        visible: overview.hasProject
+                        text: "打开巡检工作台…"
+                        onClicked: workbench.open()
+                    }
                 }
                 Label {
                     Layout.fillWidth: true
@@ -136,7 +145,32 @@ Flickable {
                     maximumLineCount: 2
                     elide: Text.ElideRight
                 }
-
+                RowLayout {
+                    Layout.fillWidth: true
+                    visible: overview.hasProject
+                    spacing: 5
+                    Repeater {
+                        model: [
+                            {label:"本设备资料",value:overview.files.filter(row => row.device_id === overview.selectedDevice.id).length},
+                            {label:"融合事件",value:overview.events.filter(row => row.device_id === overview.selectedDevice.id).length},
+                            {label:"完成分析",value:overview.events.filter(row => row.device_id === overview.selectedDevice.id && row.analyzed).length},
+                            {label:"未关闭缺陷",value:overview.inspectionCounts.openDefects || 0}
+                        ]
+                        Rectangle {
+                            required property var modelData
+                            Layout.fillWidth: true
+                            Layout.preferredHeight: 31
+                            color: "#f7f9fc"
+                            border.color: "#c4cdd7"
+                            RowLayout {
+                                anchors.fill: parent
+                                anchors.margins: 5
+                                Label { Layout.fillWidth: true; text: modelData.label; elide: Text.ElideRight }
+                                Label { text: modelData.value; color: "#265c83"; font.bold: true; font.pixelSize: 16 }
+                            }
+                        }
+                    }
+                }
             }
         }
 
@@ -388,5 +422,15 @@ Flickable {
                 }
             }
         }
+    }
+
+    ProjectInspectionWorkbench {
+        id: workbench
+        workspace: overview.workspace
+        initialDeviceId: overview.selectedDevice.id || ""
+        onEvidenceRequested: function(id) { overview.previewRequested(id) }
+        onManageRequested: function() { overview.stepRequested("event", workbench.device) }
+        onReportsRequested: function() { overview.stepRequested("report", overview.selectedDevice) }
+        onTasksRequested: function() { overview.stepRequested("task", workbench.device) }
     }
 }

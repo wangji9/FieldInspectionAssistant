@@ -29,6 +29,7 @@
 #include <QTextDocument>
 #include <QUuid>
 #include <algorithm>
+#include <cmath>
 
 namespace {
 const QString Format = QStringLiteral("miiep.project");
@@ -462,6 +463,8 @@ QVariantMap ProjectWorkspace::openProject(const QUrl &folder)
                             "report_id TEXT PRIMARY KEY REFERENCES reports(id),snapshot TEXT NOT NULL)") ||
         !execute(candidate, "CREATE TABLE IF NOT EXISTS project_event_rules("
                             "event_id TEXT PRIMARY KEY REFERENCES fusion_events(id),classification TEXT NOT NULL)") ||
+        !execute(candidate, "CREATE TABLE IF NOT EXISTS project_event_alignment("
+                            "event_id TEXT PRIMARY KEY REFERENCES fusion_events(id),alignment TEXT NOT NULL)") ||
         !candidate.commit()) {
         candidate.rollback();
         closeDatabase(candidate);
@@ -879,13 +882,35 @@ QVariantMap ProjectWorkspace::importEvidence(const QUrl &file, const QString &de
                                               const QString &captureTime, const QString &recordId)
 {
     const QFileInfo source(file.toLocalFile());
-    auto timestamp = captureTime.trimmed().isEmpty() ? source.lastModified()
-                                                     : QDateTime::fromString(captureTime, Qt::ISODate);
+    const auto timestamp = captureTime.trimmed().isEmpty() ? source.lastModified()
+                                                          : QDateTime::fromString(captureTime, Qt::ISODateWithMs);
     const auto clock = captureTime.trimmed().isEmpty() ? "file_time"
         : timestamp.timeSpec() == Qt::LocalTime ? "declared_local" : "declared_offset";
+    if (!timestamp.isValid())
+        return failure(tr("采集时间请使用 ISO 8601 格式。"));
+    return storeEvidence(file,device,point,kind,timestamp.toMSecsSinceEpoch(),clock,0,recordId);
+}
+
+QVariantMap ProjectWorkspace::importLiveCapture(const QString &path, const QString &device, const QString &point,
+                                                const QString &kind, qint64 capturedMs, qint64 durationMs,
+                                                const QString &recordId)
+{
+    if (capturedMs <= 0 || capturedMs > QDateTime::currentMSecsSinceEpoch() + 1000 ||
+        durationMs < 0 || durationMs > 3600000 ||
+        (kind != "image" && kind != "audio" && kind != "video" && kind != "thermal"))
+        return failure(tr("采集时钟或时长无效。"));
+    const auto clock = kind == "thermal" ? "thermal_receive" : kind == "audio" ? "audio_first_block" : "camera_frame";
+    return storeEvidence(QUrl::fromLocalFile(path),device,point,kind,capturedMs,clock,durationMs,recordId);
+}
+
+QVariantMap ProjectWorkspace::storeEvidence(const QUrl &file, const QString &device, const QString &point,
+                                            const QString &kind, qint64 capturedMs, const QString &clock,
+                                            qint64 durationMs, const QString &recordId)
+{
+    const QFileInfo source(file.toLocalFile());
     const auto destination = EvidenceFolders.value(kind);
     if (!ready() || destination.isEmpty() || point.trimmed().isEmpty() || point.size() > 120
-        || !file.isLocalFile() || !source.isFile() || !timestamp.isValid()
+        || !file.isLocalFile() || !source.isFile()
         || rows("SELECT id FROM devices WHERE id=?", {device}).isEmpty())
         return failure(tr("请选择工程设备、测点和文件，时间请使用 ISO 8601 格式。"));
     if (!recordId.isEmpty()) {
@@ -909,13 +934,15 @@ QVariantMap ProjectWorkspace::importEvidence(const QUrl &file, const QString &de
     if (!QFile::copy(source.absoluteFilePath(), output))
         return failure(tr("证据文件复制失败。"));
     const auto catalog=QFileInfo(business_->databasePath()).absoluteDir().filePath("measurements/measurements.sqlite");
-    const auto metrics=projectEvidenceMetrics(kind,output,source.absoluteFilePath(),catalog);
+    auto metrics=projectEvidenceMetrics(kind,output,source.absoluteFilePath(),catalog);
+    if (durationMs > 0)
+        metrics["capture_duration_ms"] = durationMs;
     if (!db_.transaction()) {
         QFile::remove(output);
         return failure(tr("无法启动证据保存。"));
     }
     if (!execute(db_, "INSERT INTO evidence(id,device_id,point,kind,title,path,captured_ms) VALUES(?,?,?,?,?,?,?)",
-                 {id, device, point.trimmed(), kind, source.fileName(), relative, timestamp.toMSecsSinceEpoch()}) ||
+                 {id, device, point.trimmed(), kind, source.fileName(), relative, capturedMs}) ||
         !execute(db_, "INSERT INTO project_evidence_clock VALUES(?,?)", {id, clock}) ||
         (!recordId.isEmpty() && !execute(db_, "INSERT INTO project_evidence_records VALUES(?,?)", {id, recordId})) ||
         (!metrics.isEmpty() && !execute(db_, "INSERT INTO project_evidence_metrics VALUES(?,?)",
@@ -974,7 +1001,10 @@ QVariantList ProjectWorkspace::eventTimeline(const QString &eventId) const
         evidence["timeUtc"] = QDateTime::fromMSecsSinceEpoch(time, Qt::UTC).toString(Qt::ISODateWithMs);
         evidence["offsetMs"] = offset;
         evidence["offsetLabel"] = (offset > 0 ? QStringLiteral("+") : QString()) + QString::number(offset) + " ms";
-        evidence["clockLabel"] = source == "declared_offset" ? tr("注明时区") :
+        evidence["clockLabel"] = source == "camera_frame" ? tr("相机帧时间") :
+            source == "thermal_receive" ? tr("热像接收时间") :
+            source == "audio_first_block" ? tr("首块音频接收估算") :
+            source == "declared_offset" ? tr("注明时区") :
             source == "declared_local" ? tr("按本机时区解释") :
             source == "file_time" ? tr("文件时间估算") : tr("历史记录");
         evidence["modality"] = ModalityLabels.value(evidence.value("kind").toString(), tr("资料"));
@@ -1147,7 +1177,7 @@ QVariantMap ProjectWorkspace::fuse(const QString &anchorId)
                                  {anchor.value("device_id"), anchor.value("point"), time - 60000, time + 60000,
                                   recordId.isEmpty() ? QStringLiteral("") : recordId});
     QSet<QString> modalities;
-    QJsonArray ids;
+    QStringList ids;
     for (const auto &candidate : candidates) {
         const auto row = candidate.toMap();
         modalities.insert(row.value("kind").toString());
@@ -1155,21 +1185,130 @@ QVariantMap ProjectWorkspace::fuse(const QString &anchorId)
     }
     if (modalities.size() < 2)
         return failure(tr("需要同一设备、同一测点在前后 60 秒内的至少两种模态证据。"));
+    return storeFusion(anchorId,anchor.value("point").toString(),recordId,ids);
+}
+
+QVariantMap ProjectWorkspace::fuseSelected(const QString &anchorId, const QStringList &kinds, int toleranceMs)
+{
+    if (!ready() || !session_->can("inspect") || toleranceMs < 0 || toleranceMs > 60000)
+        return failure(tr("需要巡检权限，时间容差应在 0 至 60000 毫秒之间。"));
+    const QSet<QString> selected(kinds.cbegin(),kinds.cend());
+    if (selected.size() < 2 || std::any_of(selected.cbegin(),selected.cend(),
+            [](const QString &kind) { return !EvidenceFolders.contains(kind); }))
+        return failure(tr("请选择至少两种有效模态。"));
+    const auto anchor = rows("SELECT e.*,COALESCE(r.record_id,'') record_id FROM evidence e "
+                             "LEFT JOIN project_evidence_records r ON r.evidence_id=e.id WHERE e.id=?",
+                             {anchorId}).value(0).toMap();
+    const auto recordId = anchor.value("record_id").toString();
+    const auto anchorKind = anchor.value("kind").toString();
+    if (anchor.isEmpty() || !canReadLinkedRecord(recordId) || !selected.contains(anchorKind))
+        return failure(tr("请选择可访问的参考证据，并勾选它所属的模态。"));
+
+    const qint64 reference = anchor.value("captured_ms").toLongLong();
+    const auto candidates = rows("SELECT e.id,e.kind,e.title,e.captured_ms,m.metrics,c.source clock FROM evidence e "
+        "LEFT JOIN project_evidence_records r ON r.evidence_id=e.id "
+        "LEFT JOIN project_evidence_metrics m ON m.evidence_id=e.id "
+        "LEFT JOIN project_evidence_clock c ON c.evidence_id=e.id "
+        "WHERE e.device_id=? AND e.point=? AND COALESCE(r.record_id,'')=? "
+        "ORDER BY e.captured_ms,e.id",
+        {anchor.value("device_id"),anchor.value("point"),recordId});
+    const auto duration = [](const QVariantMap &entry) -> qint64 {
+        const auto metrics = QJsonDocument::fromJson(entry.value("metrics").toByteArray()).toVariant().toMap();
+        if (metrics.contains("capture_duration_ms"))
+            return qBound(qint64(0),metrics.value("capture_duration_ms").toLongLong(),qint64(3600000));
+        const auto kind = entry.value("kind").toString();
+        const double seconds = kind == "audio" ? metrics.value("duration_s").toDouble()
+            : kind == "signal" ? metrics.value("window_s").toDouble() : 0;
+        return std::isfinite(seconds) && seconds > 0 && seconds <= 3600 ? qRound64(seconds * 1000) : 0;
+    };
+    struct Match { QString id; qint64 offset = 0, duration = 0, gap = 0; bool temperatureMatrix = false; };
+    const auto clockKnown = [](const QVariantMap &entry) { return entry.value("clock").toString() != "file_time"
+        && !entry.value("clock").toString().isEmpty(); };
+    QMap<QString,Match> best;
+    qint64 referenceDuration = 0;
+    for (const auto &entry : candidates) {
+        const auto row = entry.toMap();
+        if (row.value("id") == anchorId) {
+            referenceDuration = clockKnown(row) ? duration(row) : 0;
+            break;
+        }
+    }
+    best.insert(anchorKind,{anchorId,0,referenceDuration,0});
+    for (const auto &entry : candidates) {
+        const auto row = entry.toMap();
+        const auto kind = row.value("kind").toString();
+        if (kind == anchorKind || !selected.contains(kind))
+            continue;
+        const qint64 offset = row.value("captured_ms").toLongLong() - reference;
+        const qint64 length = clockKnown(row) ? duration(row) : 0;
+        const qint64 gap = std::max({qint64(0),offset-referenceDuration,-offset-length});
+        if (gap > toleranceMs)
+            continue;
+        const auto current = best.constFind(kind);
+        const bool matrix = kind == "thermal" && row.value("title").toString().endsWith("-celsius.csv",Qt::CaseInsensitive);
+        if (current == best.cend() || gap < current->gap ||
+            (gap == current->gap && (qAbs(offset) < qAbs(current->offset) ||
+                (offset == current->offset && matrix && !current->temperatureMatrix))))
+            best.insert(kind,{row.value("id").toString(),offset,length,gap,matrix});
+    }
+    QStringList missing, ids;
+    QVariantList alignment;
+    qint64 commonStart = 0, commonEnd = referenceDuration, maxGap = 0;
+    for (const auto &kind : EvidenceFolders.keys()) {
+        if (!selected.contains(kind))
+            continue;
+        if (!best.contains(kind)) {
+            missing.append(ModalityLabels.value(kind));
+            continue;
+        }
+        const auto match = best.value(kind);
+        commonStart = qMax(commonStart,match.offset);
+        commonEnd = qMin(commonEnd,match.offset+match.duration);
+        maxGap = qMax(maxGap,match.gap);
+        ids.append(match.id);
+        alignment.append(QVariantMap{{"id",match.id},{"kind",kind},{"offset_ms",match.offset},
+                                     {"duration_ms",match.duration},{"gap_ms",match.gap}});
+    }
+    if (!missing.isEmpty())
+        return failure(tr("同设备、同测点、同巡检且在容差内缺少：%1").arg(missing.join("、")));
+    return storeFusion(anchorId,anchor.value("point").toString(),recordId,ids,
+                       {{"method","nearest_interval"},{"reference_ms",reference},
+                        {"tolerance_ms",toleranceMs},{"aligned",alignment},{"max_gap_ms",maxGap},
+                        {"has_common_time",commonStart<=commonEnd},{"common_start_ms",commonStart},
+                        {"common_end_ms",commonEnd}});
+}
+
+QVariantMap ProjectWorkspace::fusionInfo(const QString &eventId) const
+{
+    if (!canReadEvent(eventId))
+        return {};
+    const auto data = rows("SELECT alignment FROM project_event_alignment WHERE event_id=?", {eventId});
+    return QJsonDocument::fromJson(data.value(0).toMap().value("alignment").toByteArray()).toVariant().toMap();
+}
+
+QVariantMap ProjectWorkspace::storeFusion(const QString &anchorId, const QString &point, const QString &recordId,
+                                           const QStringList &ids, const QVariantMap &alignment)
+{
     const auto id = identifier();
-    const auto linked = QString::fromUtf8(QJsonDocument(ids).toJson(QJsonDocument::Compact));
-    const auto existing = rows("SELECT id FROM fusion_events WHERE anchor_id=? AND evidence_ids=?", {anchorId, linked});
+    const auto linked = QString::fromUtf8(QJsonDocument(QJsonArray::fromStringList(ids)).toJson(QJsonDocument::Compact));
+    const auto detail = alignment.isEmpty() ? QStringLiteral("")
+        : QString::fromUtf8(QJsonDocument::fromVariant(alignment).toJson(QJsonDocument::Compact));
+    const auto existing = rows("SELECT f.id FROM fusion_events f LEFT JOIN project_event_alignment a ON a.event_id=f.id "
+                               "WHERE f.anchor_id=? AND f.evidence_ids=? AND COALESCE(a.alignment,'')=?",
+                               {anchorId, linked, detail});
     if (!existing.isEmpty())
         return {{"ok", true}, {"id", existing.first().toMap().value("id")}};
     if (!db_.transaction())
         return failure(tr("无法启动融合。"));
     if (!execute(db_, "INSERT INTO fusion_events VALUES(?,?,?,?)", {id, anchorId, linked, now()}) ||
         (!recordId.isEmpty() && !execute(db_, "INSERT INTO project_event_details(event_id,record_id) VALUES(?,?)", {id, recordId})) ||
-        !storeRule(db_,id,readingVerdict(business_->connection(),recordId,anchor.value("point").toString())) ||
+        (!alignment.isEmpty() && !execute(db_, "INSERT INTO project_event_alignment VALUES(?,?)", {id,detail})) ||
+        !storeRule(db_,id,readingVerdict(business_->connection(),recordId,point)) ||
         !db_.commit()) {
         db_.rollback();
         return failure(tr("融合事件保存失败。"));
     }
-    log(tr("生成融合事件"), tr("%1 条证据，%2 种模态").arg(ids.size()).arg(modalities.size()));
+    log(tr("生成融合事件"), tr("%1 条证据").arg(ids.size()));
     emit changed();
     return {{"ok", true}, {"id", id}};
 }
@@ -1183,6 +1322,11 @@ QVariantMap ProjectWorkspace::analysisInput(const QString &eventId) const
     if (event.isEmpty())
         return failure(tr("请先选择融合事件。"));
     QStringList lines;
+    const auto alignment = fusionInfo(eventId);
+    if (!alignment.isEmpty())
+        lines << tr("时间融合规则：同设备、同测点的最近时间区间；容差 %1 ms，最大间隙 %2 ms，全部模态有共同时间点：%3。时间匹配只表明时序邻近。")
+            .arg(alignment.value("tolerance_ms").toInt()).arg(alignment.value("max_gap_ms").toLongLong())
+            .arg(alignment.value("has_common_time").toBool() ? tr("是") : tr("否"));
     int excerptBudget = 1800;
     for (const auto &value : eventTimeline(eventId)) {
         const auto item = value.toMap();

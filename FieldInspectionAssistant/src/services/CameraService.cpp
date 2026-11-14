@@ -93,22 +93,26 @@ void CameraService::setSaveDirectory(const QString&path){
     saveDirectory_=QDir::cleanPath(value);QSettings().setValue("capture/saveDirectory",saveDirectory_);emit settingsChanged();
 }
 QString CameraService::newMediaPath(const QString&extension)const{return QDir(saveDirectory_).filePath(QDateTime::currentDateTime().toString("yyyyMMdd_HHmmss_zzz")+"_"+QUuid::createUuid().toString(QUuid::WithoutBraces).left(6)+"."+extension);}
-void CameraService::photoSaved(const QString&path,bool ok){
+void CameraService::photoSaved(const QString&path,bool ok,qint64 capturedMs){
     photoSaving_=false;emit stateChanged();if(!ok){setStatus("照片保存失败，请检查目录权限和空间");emit error(status_);return;}
     lastPhoto_=path;QSettings().setValue("capture/lastPhoto",path);setStatus("照片已保存："+path);emit mediaSaved();
+    emit captureSaved("image",path,capturedMs,0);
 }
 bool CameraService::savePhotoAsync(const QString&format,int quality){
     if(!authorized())return false;
     if(recording_||finalizing_){setStatus("请先停止录像并等待保存完成再拍照");return false;}
-    if(photoSaving_||opening_||closing_||!isOpen()||!hasFrame()){setStatus("请先打开摄像头并等待实时画面");return false;}auto jpeg=cameraJpeg(store_);if(jpeg.isEmpty())return false;
+    if(photoSaving_||opening_||closing_||!isOpen()||!hasFrame()){setStatus("请先打开摄像头并等待实时画面");return false;}
+    qint64 capturedMs=0;auto jpeg=cameraJpeg(store_,&capturedMs);if(jpeg.isEmpty())return false;
     auto type=format.toUpper()=="PNG"?QByteArray("PNG"):QByteArray("JPG");auto path=newMediaPath(type.toLower());int rotation=rotation_;bool mirrored=mirrored_;
     photoSaving_=true;setStatus("正在后台保存照片…");emit stateChanged();
-    auto *task=QThread::create([this,jpeg,path,type,quality,rotation,mirrored]{bool ok=saveCameraPhoto(jpeg,path,type,quality,rotation,mirrored);QMetaObject::invokeMethod(this,[this,path,ok]{photoSaved(path,ok);},Qt::QueuedConnection);});
+    auto *task=QThread::create([this,jpeg,path,type,quality,rotation,mirrored,capturedMs]{bool ok=saveCameraPhoto(jpeg,path,type,quality,rotation,mirrored);QMetaObject::invokeMethod(this,[this,path,ok,capturedMs]{photoSaved(path,ok,capturedMs);},Qt::QueuedConnection);});
     task->setParent(this);connect(task,&QThread::finished,task,&QObject::deleteLater);task->start();return true;
 }
 QString CameraService::savePhoto(const QString&format,int quality){
     if(!authorized()||recording_||finalizing_||photoSaving_)return {};
-    if(!isOpen()||!hasFrame())return {};auto type=format.toUpper()=="PNG"?QByteArray("PNG"):QByteArray("JPG");auto path=newMediaPath(type.toLower());bool ok=saveCameraPhoto(cameraJpeg(store_),path,type,quality,rotation_,mirrored_);photoSaved(path,ok);return ok?path:QString();
+    if(!isOpen()||!hasFrame())return {};auto type=format.toUpper()=="PNG"?QByteArray("PNG"):QByteArray("JPG");auto path=newMediaPath(type.toLower());
+    qint64 capturedMs=0;auto jpeg=cameraJpeg(store_,&capturedMs);
+    bool ok=saveCameraPhoto(jpeg,path,type,quality,rotation_,mirrored_);photoSaved(path,ok,capturedMs);return ok?path:QString();
 }
 bool CameraService::captureJpeg(const QString&path){if(!authorized())return false;if(!isOpen()||!hasFrame())return false;return saveCameraPhoto(cameraJpeg(store_),path,"JPG",92,rotation_,mirrored_);}
 QString CameraService::photoForQuestion(){
@@ -128,6 +132,9 @@ bool CameraService::startVideo(int fps,int seconds,int quality){
 void CameraService::stopVideo(){if(!recorder_||!recording_)return;recordedSeconds_=recordClock_.elapsed()/1000;recording_=false;finalizing_=true;recorder_->requestInterruption();setStatus("正在后台保存录像…");emit recordingChanged();}
 void CameraService::recorderFinished(){
     auto result=recorder_->result();recording_=false;finalizing_=false;recordedSeconds_=qRound(result["duration"].toDouble());recorder_->deleteLater();recorder_=nullptr;
-    if(result["ok"].toBool()){lastVideo_=result["path"].toString();setStatus("录像已保存："+lastVideo_);emit mediaSaved();}else{setStatus("录像保存失败："+result["error"].toString());emit error(status_);}emit recordingChanged();
+    if(result["ok"].toBool()){
+        lastVideo_=result["path"].toString();setStatus("录像已保存："+lastVideo_);emit mediaSaved();
+        emit captureSaved("video",lastVideo_,result["captured_ms"].toLongLong(),qRound64(result["duration"].toDouble()*1000));
+    }else{setStatus("录像保存失败："+result["error"].toString());emit error(status_);}emit recordingChanged();
 }
 void CameraService::openSaveDirectory(){QDir().mkpath(saveDirectory_);QDesktopServices::openUrl(QUrl::fromLocalFile(saveDirectory_));}

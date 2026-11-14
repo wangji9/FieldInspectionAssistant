@@ -17,6 +17,7 @@ class ThermalCapture : public QQuickPaintedItem
     Q_PROPERTY(bool connected READ connected NOTIFY changed)
     Q_PROPERTY(bool paused READ paused NOTIFY changed)
     Q_PROPERTY(bool hasFrame READ hasFrame NOTIFY changed)
+    Q_PROPERTY(qint64 capturedMs READ capturedMs NOTIFY changed)
     Q_PROPERTY(double fps READ fps NOTIFY changed)
     Q_PROPERTY(QString status READ status NOTIFY changed)
     Q_PROPERTY(QString autoSaveStatus READ autoSaveStatus NOTIFY changed)
@@ -33,6 +34,7 @@ public:
     bool connected() const { return fd_ >= 0; }
     bool paused() const { return paused_; }
     bool hasFrame() const { return !raw_.isEmpty(); }
+    qint64 capturedMs() const { return hasFrame() && lastFrame_.isValid() ? capturedMs_ : 0; }
     double fps() const { return fps_; }
     QString status() const { return status_; }
     QString autoSaveStatus() const { return autoSaveStatus_; }
@@ -61,6 +63,7 @@ public:
     Q_INVOKABLE bool applyOptions(const QVariantMap &options, bool persist);
     Q_INVOKABLE QString saveFrame(const QUrl &folder);
     Q_INVOKABLE QStringList saveFrameFiles(const QUrl &folder);
+    Q_INVOKABLE QStringList saveInspectionFrame(const QString &folder);
     Q_INVOKABLE QString exportTrend(const QUrl &folder);
 
 signals:
@@ -76,6 +79,7 @@ protected:
     void wheelEvent(QWheelEvent *event) override;
 
 private:
+    QStringList saveFrameFiles(const QUrl &folder, bool png, bool raw, bool csv);
     void receive();
     void frame(const QByteArray &packet);
     void refreshMeasurements();
@@ -100,6 +104,7 @@ private:
     QSocketNotifier *notifier_ = nullptr;
     QTimer ticker_;
     QElapsedTimer rate_, lastFrame_, autoSaveClock_;
+    qint64 capturedMs_ = 0;
     double zoom_ = 1, fps_ = 0;
     int fd_ = -1, frames_ = 0, deviceId_ = 0;
     bool paused_ = false, matrix_ = false, testing_ = false, streaming_ = false;

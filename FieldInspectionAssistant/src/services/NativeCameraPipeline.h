@@ -12,7 +12,7 @@ struct CameraFrameStore {
     bool mirrored=false,opened=false;
     bool notifyPreview=false,previewNotificationPending=false;
     quint64 captured=0,decoded=0,sequence=0,stale=0,invalid=0;
-    qint64 previewCapturedMs=0;
+    qint64 previewCapturedMs=0,jpegCapturedMs=0;
     int previewRotation=0;
     bool previewMirrored=false;
     double decodeMs=0,actualFps=0;
@@ -43,5 +43,5 @@ private:
     mutable QMutex mutex_;QVariantMap result_;
 };
 
-QByteArray cameraJpeg(const std::shared_ptr<CameraFrameStore>&store);
+QByteArray cameraJpeg(const std::shared_ptr<CameraFrameStore>&store, qint64 *capturedMs=nullptr);
 bool saveCameraPhoto(const QByteArray &jpeg,const QString &path,const QByteArray &format,int quality,int rotation,bool mirrored);

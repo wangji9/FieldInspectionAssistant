@@ -232,6 +232,7 @@ void ThermalCapture::receive()
 
 void ThermalCapture::frame(const QByteArray &packet)
 {
+    capturedMs_ = QDateTime::currentMSecsSinceEpoch();
     raw_ = packet.mid(4, DataBytes);
     deviceId_ = static_cast<uchar>(packet[3]);
     const auto *data = reinterpret_cast<const uchar *>(raw_.constData());
@@ -242,7 +243,7 @@ void ThermalCapture::frame(const QByteArray &packet)
     status_ = tr("正在接收热像数据");
     refreshMeasurements();
     rebuildImage();
-    Reading reading{QDateTime::currentMSecsSinceEpoch(), {}};
+    Reading reading{capturedMs_, {}};
     for (auto it = history_.crbegin(); it != history_.crend(); ++it) {
         if (reading.time - it->time >= 10000) {
             if (reading.time - it->time <= 11500)
@@ -524,11 +525,24 @@ QString ThermalCapture::saveFrame(const QUrl &folder)
 
 QStringList ThermalCapture::saveFrameFiles(const QUrl &folder)
 {
+    return saveFrameFiles(folder,options_.value("png").toBool(),options_.value("raw").toBool(),
+                          options_.value("csv").toBool());
+}
+
+QStringList ThermalCapture::saveInspectionFrame(const QString &folder)
+{
+    if (!QDir::isAbsolutePath(folder) || !QDir().mkpath(folder))
+        return {};
+    return saveFrameFiles(QUrl::fromLocalFile(folder),true,false,true);
+}
+
+QStringList ThermalCapture::saveFrameFiles(const QUrl &folder, bool png, bool raw, bool matrixCsv)
+{
     if (!hasFrame() || !folder.isLocalFile() || !QDir(folder.toLocalFile()).exists())
         return {};
     const auto path = QDir(folder.toLocalFile()).filePath("thermal-" + timestamp());
     QStringList outputs;
-    if (options_.value("png").toBool()) {
+    if (png) {
         QImage rendered(800, 600, QImage::Format_RGB32);
         QPainter painter(&rendered);
         drawImage(painter, rendered.rect(), true);
@@ -537,9 +551,9 @@ QStringList ThermalCapture::saveFrameFiles(const QUrl &folder)
         if (file.open(QIODevice::WriteOnly) && rendered.save(&file, "PNG") && file.commit())
             outputs << path + ".png";
     }
-    if (options_.value("raw").toBool() && write(path + ".raw", raw_))
+    if (raw && write(path + ".raw", raw_))
         outputs << path + ".raw";
-    if (options_.value("csv").toBool()) {
+    if (matrixCsv) {
         QByteArray csv;
         for (int y = 0; y < Height; ++y) {
             for (int x = 0; x < Width; ++x) {

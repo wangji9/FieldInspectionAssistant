@@ -63,6 +63,7 @@ public:
     Q_INVOKABLE void exportFile(const QString &path,const QString &format,const QString &scope=QStringLiteral("full"));
 signals:
     void changed();void snapshotChanged();void trendsChanged();void saved(const QString &path);
+    void captureSaved(const QString &path, qint64 capturedMs, qint64 durationMs);
     void recordingOperationFinished(bool ok,const QString &message);
 private:
     void startNative(const QString &source, bool acousticCapture);

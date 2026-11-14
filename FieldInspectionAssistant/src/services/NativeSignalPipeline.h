@@ -24,6 +24,7 @@ private:
     QVariantMap device_;QString path_,id_,error_;int rate_,channels_;
     mutable QMutex mutex_;QVector<qint16> ring_;quint64 write_=0,available_=0;qint64 receivedMs_=0;
     std::atomic<quint64>sequence_{0},frames_{0},xruns_{0};double started_=0;
+    qint64 firstSampleMs_=0;
     std::atomic<quint64>packets_{0},checksumErrors_{0};
     std::atomic_bool hasSignal_{false};
     std::atomic_bool finalized_{false};
